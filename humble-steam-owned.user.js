@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Humble Bundle — Owned on Steam
+// @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.0.0
+// @version      2.0.1
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -45,7 +45,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.0.0';
+  const VERSION       = '2.0.1';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -60,7 +60,7 @@
   const warn = (...a) => console.warn(LOG, ...a);
 
   // ---------------------------------------------------------------------------
-  // Alias map — curated exceptions
+  // Alias map - curated exceptions
   // ---------------------------------------------------------------------------
   //
   // Only needed when Humble and Steam disagree in a way normalisation cannot
@@ -71,7 +71,7 @@
   //   'pac man championship edition 2': 6000,
   //   'grand theft auto v': 'grand theft auto v enhanced',
   //
-  // Contributions welcome — please include a note on why the pair is needed.
+  // Contributions welcome - please include a note on why the pair is needed.
 
   const ALIASES = Object.create(null);
 
@@ -105,24 +105,55 @@
     try { localStorage.removeItem(key); } catch { /* ignore */ }
   }
 
+  function getXhr() {
+    if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
+    if (GMAPI && GMAPI.xmlHttpRequest) return GMAPI.xmlHttpRequest.bind(GMAPI);
+    return null;
+  }
+
+  function hostOf(url) {
+    try { return new URL(url).host; } catch { return url; }
+  }
+
+  /**
+   * Managers report cross-origin failures through `onerror` with almost no
+   * context, so squeeze out whatever the response object carries. A blocked
+   * @connect permission looks like status 0 with an empty readyState; a real
+   * network failure usually carries an `error` string.
+   */
+  function describeFailure(kind, r, host) {
+    const bits = [];
+    if (r) {
+      if (r.error)               bits.push('error=' + r.error);
+      if (r.status)              bits.push('status=' + r.status + (r.statusText ? ' ' + r.statusText : ''));
+      else if (r.status === 0)   bits.push('status=0 (request never left the browser)');
+      if (r.readyState != null)  bits.push('readyState=' + r.readyState);
+      if (r.finalUrl)            bits.push('finalUrl=' + r.finalUrl);
+    }
+    return `${kind} ${host}` + (bits.length ? ` - ${bits.join(', ')}` : '') +
+           '. Run hbso.debugFetch() in the console for the full response.';
+  }
+
   function request(url) {
-    const xhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
-              : (GMAPI && GMAPI.xmlHttpRequest) ? GMAPI.xmlHttpRequest.bind(GMAPI)
-              : null;
+    const xhr = getXhr();
     if (!xhr) {
       return Promise.reject(new Error(
         'GM_xmlhttpRequest is unavailable. Re-install the script so the manager grants it.'));
     }
-    const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+    const host = hostOf(url);
     return new Promise((resolve, reject) => {
       xhr({
         method: 'GET',
         url,
         timeout: REQ_TIMEOUT,
         headers: { Accept: 'text/xml,application/xml,application/json,text/html;q=0.9,*/*;q=0.8' },
-        onload:    r  => resolve({ status: r.status, text: r.responseText || '', finalUrl: r.finalUrl || '' }),
-        onerror:   () => reject(new Error('Could not reach ' + host + '.')),
-        ontimeout: () => reject(new Error('Timed out reaching ' + host + '.')),
+        onload: r => resolve({ status: r.status, text: r.responseText || '', finalUrl: r.finalUrl || '' }),
+        onerror: r => {
+          warn('raw failure object for', host, r);
+          reject(new Error(describeFailure('Could not reach', r, host)));
+        },
+        ontimeout: r => reject(new Error(describeFailure('Timed out reaching', r, host))),
+        onabort:   r => reject(new Error(describeFailure('Request aborted for', r, host))),
       });
     });
   }
@@ -149,6 +180,7 @@
 
   /** Reads appids + names from the community games feed (needs a Steam session). */
   async function fetchGamesFeed() {
+    console.log("Fetch games feed started...")
     const res = await request(URL_GAMES_XML);
     if (looksLikeLoginPage(res)) throw new NotSignedInError();
 
@@ -291,7 +323,7 @@
   }
 
   /**
-   * The title with its subtitle removed — "The Witcher 3: Wild Hunt" -> "the witcher 3".
+   * The title with its subtitle removed - "The Witcher 3: Wild Hunt" -> "the witcher 3".
    *
    * Only returned when it is safe to compare against a *full* title:
    *  - the base must contain a number, so franchise names ("batman", "fallout")
@@ -555,7 +587,7 @@
   function startObserver() {
     new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
 
-    // Humble is a SPA. On navigation, clear everything and start over — React
+    // Humble is a SPA. On navigation, clear everything and start over - React
     // reuses nodes, so a stale badge can otherwise outlive the product it named.
     let lastPath = location.pathname;
     setInterval(() => {
@@ -647,7 +679,7 @@
     body.appendChild(h('h2', { class: 'hbso-title', text: 'Connect your Steam library' }));
     body.appendChild(h('p', { class: 'hbso-copy', text:
       'Sign in to Steam in this browser, then connect. Your library is read from ' +
-      'your own Steam session — no API key, no profile URL, and private libraries work too.' }));
+      'your own Steam session - no API key, no profile URL, and private libraries work too.' }));
 
     if (state.error) {
       body.appendChild(h('div', { class: 'hbso-alert' },
@@ -759,7 +791,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Console helpers — `hbso.diagnose()` etc.
+  // Console helpers - `hbso.diagnose()` etc.
   // ---------------------------------------------------------------------------
 
   const api = {
@@ -770,6 +802,57 @@
     reset: disconnectLibrary,
     normalize,
     match: (title, appid) => state.index ? matchProduct(state.index, title, appid) : null,
+    /**
+     * Raw request probe. Logs everything the manager gives back, including the
+     * failure object that a normal sync hides.
+     *
+     *   hbso.debugFetch()                                  -> the Steam games feed
+     *   hbso.debugFetch('https://store.steampowered.com/dynamicstore/userdata/')
+     */
+    debugFetch(url = URL_GAMES_XML) {
+      const xhr = getXhr();
+      if (!xhr) {
+        console.error(LOG, 'GM_xmlhttpRequest is not available at all - the @grant lines did not take effect.');
+        return Promise.resolve(null);
+      }
+      console.log(LOG, 'GET', url);
+      return new Promise(resolve => {
+        const report = kind => r => {
+          console.log(LOG, kind, {
+            status: r && r.status,
+            statusText: r && r.statusText,
+            readyState: r && r.readyState,
+            finalUrl: r && r.finalUrl,
+            error: r && r.error,
+            responseHeaders: r && r.responseHeaders,
+            bodyStart: r && r.responseText ? r.responseText.slice(0, 400) : null,
+          });
+          console.log(LOG, 'raw response object:', r);
+          resolve(r);
+        };
+        xhr({
+          method: 'GET', url, timeout: REQ_TIMEOUT,
+          onload: report('onload'), onerror: report('onerror'),
+          ontimeout: report('ontimeout'), onabort: report('onabort'),
+        });
+      });
+    },
+
+    /** Tries both Steam hosts so you can tell a per-domain block from a manager-wide one. */
+    async debugAll() {
+      console.log(LOG, '--- steamcommunity.com ---');
+      const a = await api.debugFetch(URL_GAMES_XML);
+      console.log(LOG, '--- store.steampowered.com ---');
+      const b = await api.debugFetch(URL_USERDATA);
+      const ok = r => r && r.status > 0;
+      console.log(LOG, 'verdict:',
+        ok(a) && ok(b) ? 'both hosts reachable - the failure is elsewhere' :
+        !ok(a) && !ok(b) ? 'BOTH blocked - userscript manager permissions, not Steam' :
+        ok(b) ? 'only steamcommunity.com is blocked - check @connect / an extension blocking it' :
+                'only store.steampowered.com is blocked');
+      return { games: a, userdata: b };
+    },
+
     diagnose() {
       const rows = [];
       for (const adapter of ADAPTERS) {
