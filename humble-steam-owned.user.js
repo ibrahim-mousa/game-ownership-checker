@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.6.2
+// @version      2.6.3
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.6.2';
+  const VERSION       = '2.6.3';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -1569,11 +1569,12 @@
   // ---------------------------------------------------------------------------
 
   const CSS = `
-/* Top-right: Humble draws its own diagonal "EARLY ACCESS" / "NEW" ribbon across
-   the top-left corner. Identical to the top-left rule apart from the offset --
-   no max-width, which collapses the badge when the host has no width. */
+/* Known issue: Humble draws a diagonal "EARLY ACCESS" / "NEW" ribbon across the
+   top-left corner, which this overlaps. Switching the offset to right:8px makes
+   the badge vanish: the host element cannot hold a right-anchored child.
+   Unresolved. */
 .hbso-badge{
-  position:absolute; top:8px; right:8px; z-index:30;
+  position:absolute; top:8px; left:8px; z-index:30;
   display:inline-flex; align-items:center; gap:5px;
   padding:3px 7px; border-radius:3px;
   background:rgba(23,40,56,.94);
