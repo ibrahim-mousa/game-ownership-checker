@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.1.2
+// @version      2.2.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -46,7 +46,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.1.2';
+  const VERSION       = '2.2.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -163,7 +163,7 @@
         raw: r,
       });
       xhr({
-        method: 'GET', url, timeout: REQ_TIMEOUT,
+        method: 'GET', url, timeout: REQ_TIMEOUT, anonymous: false,
         onload: report('onload'), onerror: report('onerror'),
         ontimeout: report('ontimeout'), onabort: report('onabort'),
       });
@@ -200,29 +200,39 @@
     }
     if (live(p.root) && dead(p.deep)) {
       return { level: 'bad', text:
-        'The homepage loads but other paths on steamcommunity.com do not. Something ' +
-        'is filtering by URL \u2014 check content blockers and privacy extensions.' };
+        'The homepage loads but other paths on steamcommunity.com do not \u2014 ' +
+        'something is filtering by URL. Check content blockers.' };
     }
-    if (live(p.deep) && dead(p.redirect) && dead(p.feed)) {
+
+    // The decisive check. Reaching Steam is worthless if the request arrives
+    // signed out: Steam answers 200 with a login page or an empty payload, so
+    // status codes alone look perfectly healthy.
+    const signedOut = (live(p.root) && !p.root.steamId)
+      || (p.store && p.store.ownedCount === 0);
+    if (signedOut) {
       return { level: 'bad', text:
-        'Ordinary pages load but every redirecting URL fails \u2014 your userscript ' +
-        'manager is refusing to follow redirects. Please open an issue.' };
+        'Steam is reachable but the requests are arriving SIGNED OUT \u2014 your ' +
+        'cookies are not being attached. Everything returning 200 is a login page ' +
+        'or an empty payload. Check that you are signed in at steamcommunity.com ' +
+        'in this browser, and that the userscript manager is allowed to send ' +
+        'cookies (Violentmonkey on Firefox may need Enhanced Tracking Protection ' +
+        'turned off for Steam).' };
+    }
+
+    if (live(p.feed) && p.feed.gamesFound === null) {
+      return { level: 'warn', text:
+        'Signed in and the games page loaded, but its markup was not recognised. ' +
+        'This is a parser fix \u2014 please send the page structure.' };
+    }
+    if (live(p.feed) && p.feed.gamesFound > 0) {
+      return { level: 'ok', text:
+        `Signed in and ${p.feed.gamesFound} games parsed. The retired xml feed ` +
+        'failing is expected and harmless.' };
     }
     if (live(p.root) && dead(p.feed)) {
       return { level: 'bad', text:
         'The games page specifically is failing while the rest of steamcommunity.com ' +
         'works. Check content blockers, then please open an issue.' };
-    }
-    if (p.store && p.store.ownedCount === 0) {
-      return { level: 'bad', text:
-        'Steam is reachable, but the store reports 0 owned games \u2014 you are not ' +
-        'signed in to Steam in this browser, or cookies are not reaching it. Sign in ' +
-        'at store.steampowered.com and try again.' };
-    }
-    if (live(p.feed)) {
-      return { level: 'ok', text:
-        'Steam is reachable and the games page responded. The retired xml feed failing ' +
-        'is expected and harmless.' };
     }
     return { level: 'warn', text:
       'Mixed results \u2014 check the rows above. A non-zero status means the network is fine.' };
@@ -240,6 +250,9 @@
         method: 'GET',
         url,
         timeout: REQ_TIMEOUT,
+        // Explicit: the whole design depends on the request carrying the user's
+        // Steam session. Managers differ on the default.
+        anonymous: false,
         headers: { Accept: 'text/xml,application/xml,application/json,text/html;q=0.9,*/*;q=0.8' },
         onload: r => resolve({ status: r.status, text: r.responseText || '', finalUrl: r.finalUrl || '' }),
         onerror: r => {
@@ -966,7 +979,9 @@
     const rows = h('div', { class: 'hbso-diag__rows' });
     for (const r of probes) {
       const status = r.ok
-        ? `ok (${r.status})` + (r.ownedCount != null ? ` \u00b7 ${r.ownedCount} owned` : '')
+        ? `ok (${r.status})`
+            + (r.ownedCount != null ? ` \u00b7 ${r.ownedCount} owned` : '')
+            + (r.note ? ` \u00b7 ${r.note}` : '')
         : r.status ? `${r.kind} (${r.status})`
                    : `blocked (${r.kind}, status 0)`;
       rows.appendChild(h('div', { class: 'hbso-diag__row' },
@@ -1032,11 +1047,28 @@
       const report = Object.assign(await probeRequest(spec.url),
         { key: spec.key, label: spec.label, informational: spec.informational || false });
 
-      // A 200 from the store proves nothing on its own: signed out, it still
-      // returns 200 with empty arrays. The owned count is the real signal.
-      if (spec.key === 'store' && report.ok && report.raw && report.raw.responseText) {
+      // A 200 proves nothing on its own. Signed out, Steam answers 200 with a
+      // login page or an empty payload, so every probe checks the body.
+      const bodyText = (report.raw && report.raw.responseText) || '';
+
+      if (spec.key === 'root' && report.ok) {
+        report.steamId = parseSteamId(bodyText);
+        report.note = report.steamId ? 'signed in' : 'SIGNED OUT (no cookies)';
+      }
+
+      if (spec.key === 'feed' && report.ok) {
+        if (looksLikeLoginPage({ finalUrl: report.finalUrl || '', text: bodyText })) {
+          report.note = 'login page, not your library';
+        } else {
+          const rows = parseProfileGames(bodyText);
+          report.note = rows ? `${rows.length} games parsed` : 'markup not recognised';
+          report.gamesFound = rows ? rows.length : null;
+        }
+      }
+
+      if (spec.key === 'store' && report.ok) {
         try {
-          const data = JSON.parse(report.raw.responseText);
+          const data = JSON.parse(bodyText);
           report.ownedCount = Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps.length : 0;
         } catch { report.ownedCount = null; }
       }
