@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.0.4
+// @version      2.1.2
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -46,15 +46,18 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.0.4';
+  const VERSION       = '2.1.2';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
   const SCAN_DEBOUNCE = 250;
   const REQ_TIMEOUT   = 30000;
 
-  const URL_GAMES_XML = 'https://steamcommunity.com/my/games?tab=all&xml=1';
+  const URL_GAMES_HTML = 'https://steamcommunity.com/my/games?tab=all';
+  const URL_GAMES_XML  = 'https://steamcommunity.com/my/games?tab=all&xml=1';
   const URL_COMMUNITY = 'https://steamcommunity.com/';
+  const URL_DEEP_PATH = 'https://steamcommunity.com/login/home/';
+  const URL_MY_REDIR  = 'https://steamcommunity.com/my/';
   const URL_USERDATA  = 'https://store.steampowered.com/dynamicstore/userdata/';
   const URL_LOGIN     = 'https://store.steampowered.com/login/';
 
@@ -170,46 +173,59 @@
   /**
    * Turns the probe reports into a plain-English verdict.
    *
-   * The key discriminator is `status`. A status of 0 means the request never
-   * completed at the network layer - DNS, TLS, or something refusing the
-   * connection. Any real HTTP status (403, 302, 429) means the network is fine
-   * and the problem is above it.
+   * The probes are chosen to change exactly one variable at a time:
+   *
+   *   root     https://steamcommunity.com/            host reachable?
+   *   deep     .../login/home/                        deep path, no redirect
+   *   redirect .../my/                                redirects, no query string
+   *   feed     .../my/games?tab=all&xml=1             redirects AND has a query
+   *   store    store.steampowered.com userdata        signed in?
+   *
+   * `status: 0` means the request never completed at the network layer. Any
+   * real status means the network is fine and the problem sits above it.
    */
-  function interpretProbes(probes) {
-    const [root, feed, store] = probes;
-    const dead = r => !r.ok && !r.status;
+  function interpretProbes(p) {
+    const dead = r => r && !r.ok && !r.status;
+    const live = r => r && r.ok;
 
-    if (dead(root) && dead(feed) && dead(store)) {
+    if (dead(p.root) && dead(p.feed) && dead(p.store)) {
       return { level: 'bad', text:
-        'Every host was blocked before leaving the browser. This is the userscript ' +
+        'Every host was blocked before leaving the browser \u2014 the userscript ' +
         'manager or the extension\u2019s site-access setting, not Steam.' };
     }
-    if (dead(root) && dead(feed)) {
+    if (dead(p.root) && live(p.store)) {
       return { level: 'bad', text:
-        'steamcommunity.com is unreachable at the network layer while ' +
-        'store.steampowered.com works. That points at DNS, your ISP, a VPN, or a ' +
-        'firewall blocking the domain \u2014 not at this script. Try opening ' +
-        'https://steamcommunity.com/ in a normal tab: if that fails too, it is a ' +
-        'network block.' };
+        'steamcommunity.com is unreachable at the network layer while the store ' +
+        'works. That points at DNS, an ISP, a VPN, or a firewall blocking the domain.' };
     }
-    if (root.ok && dead(feed)) {
+    if (live(p.root) && dead(p.deep)) {
       return { level: 'bad', text:
-        'steamcommunity.com is reachable but the games feed specifically is being ' +
-        'blocked \u2014 almost always an extension filtering that URL. Try disabling ' +
-        'content blockers for steamcommunity.com.' };
+        'The homepage loads but other paths on steamcommunity.com do not. Something ' +
+        'is filtering by URL \u2014 check content blockers and privacy extensions.' };
     }
-    if (feed.ok && dead(store)) {
-      return { level: 'warn', text:
-        'Only store.steampowered.com is blocked. Non-fatal \u2014 names still sync.' };
+    if (live(p.deep) && dead(p.redirect) && dead(p.feed)) {
+      return { level: 'bad', text:
+        'Ordinary pages load but every redirecting URL fails \u2014 your userscript ' +
+        'manager is refusing to follow redirects. Please open an issue.' };
     }
-    if (root.ok && feed.ok) {
+    if (live(p.root) && dead(p.feed)) {
+      return { level: 'bad', text:
+        'The games page specifically is failing while the rest of steamcommunity.com ' +
+        'works. Check content blockers, then please open an issue.' };
+    }
+    if (p.store && p.store.ownedCount === 0) {
+      return { level: 'bad', text:
+        'Steam is reachable, but the store reports 0 owned games \u2014 you are not ' +
+        'signed in to Steam in this browser, or cookies are not reaching it. Sign in ' +
+        'at store.steampowered.com and try again.' };
+    }
+    if (live(p.feed)) {
       return { level: 'ok', text:
-        'Steam is reachable. The failure is in parsing, not the network \u2014 please ' +
-        'send this output.' };
+        'Steam is reachable and the games page responded. The retired xml feed failing ' +
+        'is expected and harmless.' };
     }
     return { level: 'warn', text:
-      'Mixed results. Check the status codes above; anything non-zero means the ' +
-      'network is fine.' };
+      'Mixed results \u2014 check the rows above. A non-zero status means the network is fine.' };
   }
 
   function request(url) {
@@ -256,30 +272,129 @@
     return /\/login\b/.test(res.finalUrl) || /steamcommunity\.com\/login/i.test(res.text.slice(0, 4000));
   }
 
-  /** Reads appids + names from the community games feed (needs a Steam session). */
-  async function fetchGamesFeed() {
-    console.log("Fetch games feed started...")
-    const res = await request(URL_GAMES_XML);
-    if (looksLikeLoginPage(res)) throw new NotSignedInError();
+  /** Decodes the HTML entities that wrap JSON inside an attribute. */
+  function decodeEntities(str) {
+    return str
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+      .replace(/&amp;/g, '&'); // last, so a literal &amp;quot; survives intact
+  }
 
-    const doc = new DOMParser().parseFromString(res.text, 'text/xml');
-    if (doc.querySelector('parsererror') || !doc.querySelector('gamesList')) {
-      // Steam serves the sign-in page (HTML) instead of XML when there is no session.
-      throw new NotSignedInError();
+  /**
+   * Pulls the games array out of the profile games page.
+   *
+   * Steam has shipped two layouts, so both are handled:
+   *   modern  <div id="gameslist_config" data-profile-gameslist="{...}">
+   *   legacy  var rgGames = [ ... ];
+   */
+  function parseProfileGames(html) {
+    const attr = html.match(/id="gameslist_config"[^>]*?data-profile-gameslist="([^"]*)"/);
+    if (attr) {
+      try {
+        const data = JSON.parse(decodeEntities(attr[1]));
+        const rows = Array.isArray(data) ? data : data.rgGames;
+        if (Array.isArray(rows)) return rows;
+      } catch (e) {
+        warn('could not parse data-profile-gameslist:', e.message);
+      }
     }
 
-    const games = [];
-    doc.querySelectorAll('games > game').forEach(node => {
-      const appid = Number(node.querySelector('appID')?.textContent || 0);
-      const name  = (node.querySelector('name')?.textContent || '').trim();
-      if (appid && name) games.push([appid, name]);
-    });
+    const inline = html.match(/var\s+rgGames\s*=\s*(\[[\s\S]*?\])\s*;/);
+    if (inline) {
+      try { return JSON.parse(inline[1]); }
+      catch (e) { warn('could not parse rgGames:', e.message); }
+    }
 
-    return {
-      steamId: (doc.querySelector('steamID64')?.textContent || '').trim(),
-      persona: (doc.querySelector('gamesList > steamID')?.textContent || '').trim(),
-      games,
-    };
+    return null;
+  }
+
+  /**
+   * The signed-in user's steamID64, read from any community page.
+   * Steam emits `g_steamID = false` when signed out, which is a definitive
+   * signal rather than the heuristics used elsewhere.
+   */
+  function parseSteamId(html) {
+    const m = html.match(/g_steamID\s*=\s*"?(\d{17})"?/);
+    return m ? m[1] : null;
+  }
+
+  function profileGamesUrl(steamId) {
+    return `https://steamcommunity.com/profiles/${steamId}/games?tab=all`;
+  }
+
+  /** steamid + persona come from the same page, in g_rgProfileData. */
+  function parseProfileIdentity(html) {
+    const m = html.match(/g_rgProfileData\s*=\s*(\{[\s\S]*?\})\s*;/);
+    if (!m) return { steamId: '', persona: '' };
+    try {
+      const d = JSON.parse(m[1]);
+      return { steamId: d.steamid || '', persona: d.personaname || '' };
+    } catch { return { steamId: '', persona: '' }; }
+  }
+
+  function normaliseRows(rows) {
+    const games = [];
+    for (const row of rows) {
+      const appid = Number(row.appid);
+      const name = String(row.name || '').trim();
+      if (appid && name) games.push([appid, name]);
+    }
+    return games;
+  }
+
+  /**
+   * Reads appids + names from the profile games page (needs a Steam session).
+   *
+   * Valve retired the `xml=1` feed. It redirects to the sign-in page
+   * unconditionally, so for a signed-in user the login page bounces straight back
+   * and the request becomes an infinite redirect loop. A userscript manager
+   * follows redirects until it gives up, then reports `onerror` with status 0 --
+   * indistinguishable from a blocked request. Retrying it as a fallback is
+   * pointless: it cannot succeed. The HTML page is the only source.
+   */
+  async function fetchGamesFeed() {
+    const tried = [];
+
+    // Fast path: one request, no lookup.
+    let res = await request(URL_GAMES_HTML);
+    if (looksLikeLoginPage(res)) throw new NotSignedInError();
+    tried.push('/my/games');
+    let rows = parseProfileGames(res.text);
+
+    // Fallback: resolve the profile and address it directly. `/my/` is a server
+    // side alias with known quirks -- it is the half of `/my/games?xml=1` that
+    // turns into a redirect loop -- while canonical profile URLs behave.
+    if (!rows) {
+      const steamId = await resolveSteamId();
+      if (steamId) {
+        res = await request(profileGamesUrl(steamId));
+        tried.push('/profiles/' + steamId + '/games');
+        if (!looksLikeLoginPage(res)) rows = parseProfileGames(res.text);
+      }
+    }
+
+    if (!rows) {
+      throw new Error(
+        'Signed in, but the games list could not be read (tried ' + tried.join(', ') + '). ' +
+        'Steam may have changed its markup \u2014 please open an issue.');
+    }
+
+    const identity = parseProfileIdentity(res.text);
+    return { steamId: identity.steamId, persona: identity.persona, games: normaliseRows(rows) };
+  }
+
+  /** Reads the signed-in steamID64 off the community home page. */
+  async function resolveSteamId() {
+    try {
+      const res = await request(URL_COMMUNITY);
+      return parseSteamId(res.text);
+    } catch (e) {
+      warn('could not resolve steam id:', e.message);
+      return null;
+    }
   }
 
   /**
@@ -850,12 +965,14 @@
     const { probes, verdict } = state.test;
     const rows = h('div', { class: 'hbso-diag__rows' });
     for (const r of probes) {
-      const status = r.ok ? `ok (${r.status})`
-                   : r.status ? `${r.kind} (${r.status})`
-                              : `blocked (${r.kind}, status 0)`;
+      const status = r.ok
+        ? `ok (${r.status})` + (r.ownedCount != null ? ` \u00b7 ${r.ownedCount} owned` : '')
+        : r.status ? `${r.kind} (${r.status})`
+                   : `blocked (${r.kind}, status 0)`;
       rows.appendChild(h('div', { class: 'hbso-diag__row' },
         h('span', { class: 'hbso-diag__host', text: r.label || r.host }),
-        h('span', { class: 'hbso-diag__state' + (r.ok ? ' is-ok' : ' is-bad'), text: status })));
+        h('span', { class: 'hbso-diag__state' +
+          (r.ok ? ' is-ok' : r.informational ? ' is-muted' : ' is-bad'), text: status })));
     }
     wrap.appendChild(rows);
     wrap.appendChild(h('p', { class: 'hbso-diag__verdict hbso-diag__verdict--' + verdict.level, text: verdict.text }));
@@ -894,29 +1011,47 @@
     }
   }
 
+  const PROBES = [
+    { key: 'root',     label: 'steamcommunity.com',     url: URL_COMMUNITY },
+    { key: 'deep',     label: '  \u21b3 deep path',         url: URL_DEEP_PATH },
+    { key: 'redirect', label: '  \u21b3 redirect (/my/)',   url: URL_MY_REDIR },
+    { key: 'feed',     label: '  \u21b3 games page',        url: URL_GAMES_HTML },
+    { key: 'xml',      label: '  \u21b3 xml feed (retired)', url: URL_GAMES_XML, informational: true },
+    { key: 'store',    label: 'store.steampowered.com', url: URL_USERDATA },
+  ];
+
   async function runConnectionTest() {
     if (state.testing) return;
     state.testing = true;
     state.test = null;
     renderPanel();
 
-    // Probing the bare host as well as the endpoint separates "the domain is
-    // unreachable" from "this one URL is being filtered".
     const probes = [];
-    for (const url of [URL_COMMUNITY, URL_GAMES_XML, URL_USERDATA]) {
-      probes.push(await probeRequest(url));
-    }
-    probes[0].label = 'steamcommunity.com';
-    probes[1].label = '  \u21b3 games feed';
-    probes[2].label = 'store.steampowered.com';
+    const byKey = {};
+    for (const spec of PROBES) {
+      const report = Object.assign(await probeRequest(spec.url),
+        { key: spec.key, label: spec.label, informational: spec.informational || false });
 
-    const verdict = interpretProbes(probes);
-    state.test = { probes, verdict };
+      // A 200 from the store proves nothing on its own: signed out, it still
+      // returns 200 with empty arrays. The owned count is the real signal.
+      if (spec.key === 'store' && report.ok && report.raw && report.raw.responseText) {
+        try {
+          const data = JSON.parse(report.raw.responseText);
+          report.ownedCount = Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps.length : 0;
+        } catch { report.ownedCount = null; }
+      }
+
+      probes.push(report);
+      byKey[spec.key] = report;
+    }
+
+    const verdict = interpretProbes(byKey);
+    state.test = { probes, byKey, verdict };
     state.testing = false;
     renderPanel();
 
     console.log(LOG, 'connection test:', verdict.text);
-    for (const p of probes) console.log(LOG, p.url, '->', p);
+    for (const r of probes) console.log(LOG, r.url, '->', r);
     return state.test;
   }
 
@@ -1081,6 +1216,7 @@
 .hbso-diag__state{font-weight:700}
 .hbso-diag__state.is-ok{color:#5ba32b}
 .hbso-diag__state.is-bad{color:#d65c4a}
+.hbso-diag__state.is-muted{color:#6b7f91;font-weight:400}
 .hbso-diag__verdict{margin:9px 0 0;font-size:10.5px;line-height:1.5;color:#8fa3b5}
 .hbso-diag__verdict--bad{color:#e6b0a6}
 .hbso-diag__verdict--ok{color:#9ec97f}
