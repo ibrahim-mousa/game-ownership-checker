@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.6.1
+// @version      2.6.2
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.6.1';
+  const VERSION       = '2.6.2';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -1005,10 +1005,7 @@
   function badgeHost(card, adapter) {
     for (const sel of adapter.anchor) {
       const el = card.querySelector(sel);
-      if (!el || VOID_TAGS.test(el.tagName)) continue;
-      // A right-anchored badge inside a zero-width host extends leftwards out
-      // of the card, where an ancestor's overflow clips it away.
-      if (el.offsetWidth > 0) return el;
+      if (el && !VOID_TAGS.test(el.tagName)) return el;
     }
     return card;
   }
@@ -1572,16 +1569,11 @@
   // ---------------------------------------------------------------------------
 
   const CSS = `
-/* Top-RIGHT deliberately. Humble draws its own diagonal "EARLY ACCESS" / "NEW"
-   ribbon across the top-left corner of a card, so a badge there collides with
-   it no matter how small. Do not move this back to the left.
-
-   Do NOT add a percentage max-width here. Anchored right, if the host resolves
-   to zero width then calc(100% - 16px) goes negative, CSS clamps it to 0, and
-   the badge silently disappears. That regression is why badgeHost() below
-   refuses zero-width hosts. */
+/* Top-right: Humble draws its own diagonal "EARLY ACCESS" / "NEW" ribbon across
+   the top-left corner. Identical to the top-left rule apart from the offset --
+   no max-width, which collapses the badge when the host has no width. */
 .hbso-badge{
-  position:absolute; top:8px; right:8px; left:auto; z-index:30;
+  position:absolute; top:8px; right:8px; z-index:30;
   display:inline-flex; align-items:center; gap:5px;
   padding:3px 7px; border-radius:3px;
   background:rgba(23,40,56,.94);
@@ -1594,7 +1586,7 @@
 }
 .hbso-badge__icon{width:11px;height:11px;flex:0 0 auto;opacity:.95}
 .hbso-badge--likely{color:#a7cfe4;border-color:rgba(167,207,228,.4);border-style:dashed}
-.hbso-badge--inline{position:static;top:auto;right:auto;margin:10px 0 0;display:inline-flex}
+.hbso-badge--inline{position:static;margin:10px 0 0;display:inline-flex}
 
 .hbso-root{position:fixed;right:18px;bottom:18px;z-index:2147483000;
   font-family:"Nunito Sans","Brandon Text",system-ui,-apple-system,sans-serif}
