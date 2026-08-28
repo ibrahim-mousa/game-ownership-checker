@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.2.1
+// @version      2.3.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -46,7 +46,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.2.1';
+  const VERSION       = '2.3.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -328,7 +328,7 @@
       catch (e) { warn('could not parse rgGames:', e.message); }
     }
 
-    return null;
+    return scavengeGames(html);
   }
 
   /**
@@ -338,19 +338,35 @@
   function describeMarkup(html) {
     const markers = [
       'gameslist_config', 'data-profile-gameslist', 'rgGames', 'g_rgProfileData',
-      'GetOwnedGames', 'games_list_tab', 'gameListRow', 'profile_small_header',
-      'responsive_page_template_content', 'application/json',
+      'GetOwnedGames', 'IPlayerService', 'webapi_token', 'access_token',
+      'games_list_tab', 'responsive_page_template_content', 'application/json',
     ];
     const uniq = arr => Array.from(new Set(arr));
     const grab = (re, group) => uniq(Array.from(html.matchAll(re)).map(m => m[group]));
 
+    const title = html.match(/<title>([\s\S]{0,200}?)<\/title>/i);
+    const appidHits = (html.match(/"?appid"?\s*[:=]/gi) || []).length;
+
+    // A window around the first few appids says more than any marker list.
+    const samples = [];
+    const probe = /"?appid"?\s*[:=]/gi;
+    let m;
+    while ((m = probe.exec(html)) !== null && samples.length < 3) {
+      samples.push(html.slice(Math.max(0, m.index - 90), m.index + 130).replace(/\s+/g, ' '));
+      probe.lastIndex += 2000;
+    }
+
     return {
       length: html.length,
-      markers: markers.filter(m => html.includes(m)),
+      title: title ? title[1].trim() : '(no <title>)',
+      opensWith: html.slice(0, 180).replace(/\s+/g, ' '),
+      appidHits,
+      samples,
+      markers: markers.filter(x => html.includes(x)),
       gameIds: grab(/id="([^"]*game[^"]*)"/gi, 1).slice(0, 10),
       bigDataAttrs: grab(/\s(data-[a-z-]+)="[^"]{200,}"/gi, 1).slice(0, 10),
-      jsonScriptIds: grab(/<script[^>]+type="application\/json"[^>]*id="([^"]+)"/gi, 1).slice(0, 10),
-      bigVars: grab(/var\s+([A-Za-z_$][\w$]*)\s*=\s*[[{][^;]{200,}/g, 1).slice(0, 10),
+      jsonScriptIds: grab(/<script[^>]*id="([^"]+)"[^>]*>/gi, 1).slice(0, 10),
+      bigVars: grab(/(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[[{][^;]{200,}/g, 1).slice(0, 10),
     };
   }
 
@@ -366,6 +382,37 @@
 
   function profileGamesUrl(steamId) {
     return `https://steamcommunity.com/profiles/${steamId}/games?tab=all`;
+  }
+
+  /**
+   * Last resort: scan the whole document for JSON objects that carry both an
+   * appid and a name, regardless of the container they live in.
+   *
+   * Steam keeps moving this payload between inline vars, data- attributes and
+   * JSON script tags. This does not care which -- it looks for the data itself.
+   * Only reached when the specific strategies above have all failed.
+   */
+  function scavengeGames(html) {
+    const found = [];
+    const seen = new Set();
+    const object = /\{[^{}]{0,800}?"appid"\s*:\s*"?(\d+)"?[^{}]{0,800}?\}/g;
+
+    let match;
+    while ((match = object.exec(html)) !== null) {
+      const appid = Number(match[1]);
+      if (!appid || seen.has(appid)) continue;
+
+      const name = match[0].match(/"name"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (!name) continue;
+
+      let decoded;
+      try { decoded = JSON.parse('"' + name[1] + '"'); } catch { continue; }
+      if (!decoded) continue;
+
+      seen.add(appid);
+      found.push({ appid, name: decoded });
+    }
+    return found.length ? found : null;
   }
 
   /** steamid + persona come from the same page, in g_rgProfileData. */
@@ -1028,11 +1075,15 @@
     if (hints) {
       const lines = [
         `length: ${hints.length}`,
+        `title: ${hints.title}`,
+        `opens with: ${hints.opensWith}`,
+        `"appid" hits: ${hints.appidHits}`,
         `markers: ${hints.markers.join(', ') || 'none'}`,
         `game ids: ${hints.gameIds.join(', ') || 'none'}`,
         `big data attrs: ${hints.bigDataAttrs.join(', ') || 'none'}`,
         `json script ids: ${hints.jsonScriptIds.join(', ') || 'none'}`,
         `big vars: ${hints.bigVars.join(', ') || 'none'}`,
+        ...(hints.samples.length ? ['samples:', ...hints.samples.map(x => '  ' + x)] : []),
       ];
       wrap.appendChild(h('p', { class: 'hbso-diag__label', text: 'Page structure' }));
       wrap.appendChild(h('pre', { class: 'hbso-diag__pre', text: lines.join('\n') }));
