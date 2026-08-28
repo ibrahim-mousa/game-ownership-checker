@@ -1,0 +1,920 @@
+// ==UserScript==
+// @name         Humble Bundle — Owned on Steam
+// @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
+// @version      2.0.0
+// @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
+// @author       Ibrahim Mousa
+// @license      MIT
+// @homepageURL  https://github.com/ibrahim-mousa/game-ownership-checker
+// @supportURL   https://github.com/ibrahim-mousa/game-ownership-checker/issues
+// @downloadURL  https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/humble-steam-owned.user.js
+// @updateURL    https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/humble-steam-owned.user.js
+// @match        https://www.humblebundle.com/*
+// @connect      steamcommunity.com
+// @connect      store.steampowered.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_addStyle
+// @run-at       document-idle
+// @noframes
+// ==/UserScript==
+
+/*
+ * How this works
+ * --------------
+ * Your Steam library is read through your existing Steam browser session:
+ *
+ *   https://steamcommunity.com/my/games?tab=all&xml=1   -> appids + names
+ *   https://store.steampowered.com/dynamicstore/userdata/ -> owned appid set
+ *
+ * GM_xmlhttpRequest sends your steamcommunity.com / steampowered.com cookies,
+ * so this works on PRIVATE libraries and needs no API key and no profile URL.
+ * The only requirement is being signed in to Steam in the same browser.
+ *
+ * Nothing is sent anywhere. The library is stored locally by your userscript
+ * manager and only ever compared against titles on the page.
+ */
+
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------------------
+  // Config
+  // ---------------------------------------------------------------------------
+
+  const VERSION       = '2.0.0';
+  const STORE_KEY     = 'hbso.library.v1';
+  const LOG           = '[HB Steam]';
+  const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
+  const SCAN_DEBOUNCE = 250;
+  const REQ_TIMEOUT   = 30000;
+
+  const URL_GAMES_XML = 'https://steamcommunity.com/my/games?tab=all&xml=1';
+  const URL_USERDATA  = 'https://store.steampowered.com/dynamicstore/userdata/';
+  const URL_LOGIN     = 'https://store.steampowered.com/login/';
+
+  const log  = (...a) => console.log(LOG, ...a);
+  const warn = (...a) => console.warn(LOG, ...a);
+
+  // ---------------------------------------------------------------------------
+  // Alias map — curated exceptions
+  // ---------------------------------------------------------------------------
+  //
+  // Only needed when Humble and Steam disagree in a way normalisation cannot
+  // bridge (renames, regional titles, compilations). Keys are normalised Humble
+  // titles. Values are either a Steam appid (number, most precise) or a
+  // normalised Steam title (string).
+  //
+  //   'pac man championship edition 2': 6000,
+  //   'grand theft auto v': 'grand theft auto v enhanced',
+  //
+  // Contributions welcome — please include a note on why the pair is needed.
+
+  const ALIASES = Object.create(null);
+
+  // ---------------------------------------------------------------------------
+  // Userscript-manager shims (Violentmonkey / Tampermonkey / Greasemonkey)
+  // ---------------------------------------------------------------------------
+
+  const GMAPI = (typeof GM !== 'undefined') ? GM : null;
+
+  async function storageGet(key) {
+    try {
+      if (typeof GM_getValue === 'function') return await GM_getValue(key, null);
+      if (GMAPI && GMAPI.getValue) return await GMAPI.getValue(key, null);
+    } catch (e) { warn('storage read failed, falling back to localStorage', e); }
+    try { return localStorage.getItem(key); } catch { return null; }
+  }
+
+  async function storageSet(key, value) {
+    try {
+      if (typeof GM_setValue === 'function') return await GM_setValue(key, value);
+      if (GMAPI && GMAPI.setValue) return await GMAPI.setValue(key, value);
+    } catch (e) { warn('storage write failed, falling back to localStorage', e); }
+    try { localStorage.setItem(key, value); } catch { /* out of quota */ }
+  }
+
+  async function storageDel(key) {
+    try {
+      if (typeof GM_deleteValue === 'function') return await GM_deleteValue(key);
+      if (GMAPI && GMAPI.deleteValue) return await GMAPI.deleteValue(key);
+    } catch (e) { warn('storage delete failed', e); }
+    try { localStorage.removeItem(key); } catch { /* ignore */ }
+  }
+
+  function request(url) {
+    const xhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
+              : (GMAPI && GMAPI.xmlHttpRequest) ? GMAPI.xmlHttpRequest.bind(GMAPI)
+              : null;
+    if (!xhr) {
+      return Promise.reject(new Error(
+        'GM_xmlhttpRequest is unavailable. Re-install the script so the manager grants it.'));
+    }
+    const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+    return new Promise((resolve, reject) => {
+      xhr({
+        method: 'GET',
+        url,
+        timeout: REQ_TIMEOUT,
+        headers: { Accept: 'text/xml,application/xml,application/json,text/html;q=0.9,*/*;q=0.8' },
+        onload:    r  => resolve({ status: r.status, text: r.responseText || '', finalUrl: r.finalUrl || '' }),
+        onerror:   () => reject(new Error('Could not reach ' + host + '.')),
+        ontimeout: () => reject(new Error('Timed out reaching ' + host + '.')),
+      });
+    });
+  }
+
+  function addStyle(css) {
+    if (typeof GM_addStyle === 'function') { try { return GM_addStyle(css); } catch { /* fall through */ } }
+    const el = document.createElement('style');
+    el.textContent = css;
+    (document.head || document.documentElement).appendChild(el);
+    return el;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Steam client
+  // ---------------------------------------------------------------------------
+
+  class NotSignedInError extends Error {
+    constructor() { super('Not signed in to Steam in this browser.'); this.name = 'NotSignedInError'; }
+  }
+
+  function looksLikeLoginPage(res) {
+    return /\/login\b/.test(res.finalUrl) || /steamcommunity\.com\/login/i.test(res.text.slice(0, 4000));
+  }
+
+  /** Reads appids + names from the community games feed (needs a Steam session). */
+  async function fetchGamesFeed() {
+    const res = await request(URL_GAMES_XML);
+    if (looksLikeLoginPage(res)) throw new NotSignedInError();
+
+    const doc = new DOMParser().parseFromString(res.text, 'text/xml');
+    if (doc.querySelector('parsererror') || !doc.querySelector('gamesList')) {
+      // Steam serves the sign-in page (HTML) instead of XML when there is no session.
+      throw new NotSignedInError();
+    }
+
+    const games = [];
+    doc.querySelectorAll('games > game').forEach(node => {
+      const appid = Number(node.querySelector('appID')?.textContent || 0);
+      const name  = (node.querySelector('name')?.textContent || '').trim();
+      if (appid && name) games.push([appid, name]);
+    });
+
+    return {
+      steamId: (doc.querySelector('steamID64')?.textContent || '').trim(),
+      persona: (doc.querySelector('gamesList > steamID')?.textContent || '').trim(),
+      games,
+    };
+  }
+
+  /**
+   * Owned appids straight from the store session. Cheap, name-free, and it
+   * catches things the community feed can omit. Best effort: never fatal.
+   */
+  async function fetchOwnedAppIds() {
+    try {
+      const res = await request(URL_USERDATA);
+      const data = JSON.parse(res.text);
+      return Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps : [];
+    } catch (e) {
+      warn('store userdata unavailable (non-fatal):', e.message);
+      return [];
+    }
+  }
+
+  async function syncLibrary() {
+    const feed  = await fetchGamesFeed();
+    const owned = await fetchOwnedAppIds();
+    const record = {
+      v: 1,
+      steamId: feed.steamId,
+      persona: feed.persona,
+      games: feed.games,
+      ownedAppIds: owned,
+      syncedAt: Date.now(),
+    };
+    await storageSet(STORE_KEY, JSON.stringify(record));
+    log(`synced ${record.games.length} games (+${owned.length} owned appids) for ${record.persona || record.steamId}`);
+    return record;
+  }
+
+  async function loadRecord() {
+    const raw = await storageGet(STORE_KEY);
+    if (!raw) return null;
+    try {
+      const rec = JSON.parse(raw);
+      if (!rec || !Array.isArray(rec.games)) return null;
+      return rec;
+    } catch { return null; }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Title normalisation
+  // ---------------------------------------------------------------------------
+
+  // Multi-character romans only. Single letters (I, V, X) are left alone so
+  // "Mega Man X" never collides with "Mega Man 10".
+  const ROMAN = {
+    ii: 2, iii: 3, iv: 4, vi: 6, vii: 7, viii: 8, ix: 9, xi: 11, xii: 12,
+    xiii: 13, xiv: 14, xv: 15, xvi: 16, xvii: 17, xviii: 18, xix: 19, xx: 20,
+  };
+
+  const EDITION_TAIL = new RegExp(
+    '\\s+(?:the\\s+)?(?:' +
+    'goty|game of the year|digital deluxe|deluxe|definitive|enhanced|complete|ultimate|' +
+    'standard|premium|collectors|collector|anniversary|remastered|remaster|redux|' +
+    'directors cut|extended|special|gold|platinum|legendary|day one|classic' +
+    ')(?:\\s+(?:edition|cut|version|pack|bundle))?$'
+  );
+
+  // Subtitles that mean "separate product", not "same game with a tagline".
+  const CONTENT_SUBTITLE = /\b(episode|episodes|chapter|part|expansion|dlc|season pass|add on|addon|prologue|soundtrack|ost|artbook|art book|bonus)\b/;
+
+  // Products that are never the base game.
+  const NON_GAME = /\b(soundtrack|ost|artbook|art book|season pass|expansion pass|wallpapers?|comic|digital book|strategy guide|manual)\b/;
+
+  /** Lowercase + de-accent + tidy symbols, but keeps ':' and '-' for subtitle splitting. */
+  function preClean(str) {
+    return String(str)
+      // Must run before NFKD: it decomposes ™ into the letters "TM" and ℠ into "SM",
+      // which would otherwise weld themselves onto the previous word.
+      .replace(/[™®©℠]/g, ' ')  // (tm) (r) (c) (sm)
+      .replace(/[\u2018\u2019\u02bc\u00b4]/g, "'") // curly apostrophes
+      .replace(/[\u201c\u201d]/g, '"')            // curly quotes
+      .replace(/[\u2010-\u2015]/g, '-')            // hyphen / en dash / em dash
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')            // combining marks (accents)
+      .toLowerCase();
+  }
+
+  /** Strips everything that is not a letter or digit. */
+  function tighten(str) {
+    return str
+      .replace(/&/g, ' and ')
+      .replace(/'/g, '')          // "meier's" -> "meiers", so a dropped apostrophe still matches
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function normalize(str) {
+    return tighten(preClean(str));
+  }
+
+  function stripEditions(norm) {
+    let out = norm;
+    for (let i = 0; i < 3; i++) {
+      const next = out.replace(EDITION_TAIL, '');
+      if (next === out) break;
+      out = next.trim();
+    }
+    return out;
+  }
+
+  function romanize(norm) {
+    return norm.replace(/\b([ivx]{2,})\b/g, (m) => (ROMAN[m] != null ? String(ROMAN[m]) : m));
+  }
+
+  /** Every normalised spelling of a title that we consider equivalent. */
+  function fullKeys(title) {
+    const base = normalize(title);
+    if (!base) return [];
+    const keys = new Set([base, stripEditions(base)]);
+    for (const k of Array.from(keys)) keys.add(romanize(k));
+    keys.delete('');
+    return Array.from(keys);
+  }
+
+  /**
+   * The title with its subtitle removed — "The Witcher 3: Wild Hunt" -> "the witcher 3".
+   *
+   * Only returned when it is safe to compare against a *full* title:
+   *  - the base must contain a number, so franchise names ("batman", "fallout")
+   *    can never swallow a different entry in the series;
+   *  - the discarded subtitle must not name separate content ("Episode One").
+   * Returns null otherwise.
+   */
+  function baseKey(title) {
+    const pre = preClean(title);
+    const parts = pre.split(/\s*:\s*|\s+-\s+/);
+    if (parts.length < 2) return null;
+
+    const head = romanize(stripEditions(tighten(parts[0])));
+    const tail = tighten(parts.slice(1).join(' '));
+    if (!head || head.length < 3) return null;
+    if (!/\d/.test(head)) return null;
+    if (CONTENT_SUBTITLE.test(tail)) return null;
+    return head;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Matching
+  // ---------------------------------------------------------------------------
+
+  function buildIndex(record) {
+    const appIds = new Set((record.ownedAppIds || []).map(Number));
+    const full = new Map(); // normalised full title -> steam name
+    const base = new Map(); // normalised base title -> steam name
+
+    for (const [appid, name] of record.games) {
+      appIds.add(Number(appid));
+      for (const k of fullKeys(name)) if (!full.has(k)) full.set(k, name);
+      const b = baseKey(name);
+      if (b && !base.has(b)) base.set(b, name);
+    }
+    return { appIds, full, base, size: record.games.length };
+  }
+
+  /**
+   * Tiers, most trustworthy first:
+   *   1. appid            -> certain
+   *   2. exact normalised -> certain enough
+   *   3. alias            -> curated
+   *   4. subtitle/edition -> likely  (full<->base only, never base<->base)
+   */
+  function matchProduct(index, title, appid) {
+    if (appid && index.appIds.has(Number(appid))) {
+      return { tier: 'appid', how: 'Steam appid ' + appid, name: null };
+    }
+    if (!title) return null;
+    if (NON_GAME.test(normalize(title))) return null;
+
+    const keys = fullKeys(title);
+
+    for (const k of keys) {
+      if (index.full.has(k)) return { tier: 'exact', how: 'exact title match', name: index.full.get(k) };
+    }
+
+    const alias = ALIASES[normalize(title)];
+    if (alias != null) {
+      if (typeof alias === 'number' && index.appIds.has(alias)) {
+        return { tier: 'alias', how: 'alias -> appid ' + alias, name: null };
+      }
+      if (typeof alias === 'string' && index.full.has(alias)) {
+        return { tier: 'alias', how: 'alias -> ' + alias, name: index.full.get(alias) };
+      }
+    }
+
+    // Humble has the subtitle, Steam does not (or vice versa).
+    for (const k of keys) {
+      if (index.base.has(k)) return { tier: 'likely', how: 'matched Steam base title', name: index.base.get(k) };
+    }
+    const b = baseKey(title);
+    if (b && index.full.has(b)) {
+      return { tier: 'likely', how: 'matched without subtitle', name: index.full.get(b) };
+    }
+
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Humble page adapters
+  // ---------------------------------------------------------------------------
+  //
+  // Humble rewrites its markup regularly, so every hook is a list of candidates
+  // tried in order. Run `hbso.diagnose()` in the console to see what is matching
+  // on the current page.
+
+  const ADAPTERS = [
+    {
+      name: 'store-grid',           // store front, search results, wishlist, carousels
+      cards:  ['li.entity-block-container', '.entity-block-container'],
+      titles: ['span.entity-title', '.entity-title'],
+      anchor: ['.entity-image-container', '.entity-image', 'a.entity-link'],
+    },
+    {
+      name: 'bundle-tier',          // /games/<bundle>, /books/<bundle>, /software/<bundle>
+      cards:  ['.tier-item-view', '.dd-item-details', '.js-tier-item', '.tier-item'],
+      titles: ['.item-title', '.dd-image-box-caption', '.tier-item-details .item-title', 'h3'],
+      anchor: ['.dd-image-box-figure', '.item-image', '.tier-item-image'],
+    },
+    {
+      name: 'product-row',          // list-style rows used on some bundle layouts
+      cards:  ['.deliverance-item', '.selector-content'],
+      titles: ['.item-title', 'h3'],
+      anchor: [],
+    },
+  ];
+
+  function pick(root, selectors) {
+    for (const sel of selectors) {
+      const el = root.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  function extractAppId(el) {
+    const read = (node) => {
+      if (!node || !node.getAttribute) return null;
+      const v = node.getAttribute('data-steam-appid') || node.getAttribute('data-appid');
+      return v && /^\d+$/.test(v) ? Number(v) : null;
+    };
+    const own = read(el);
+    if (own) return own;
+
+    const nested = el.querySelector?.('[data-steam-appid],[data-appid]');
+    if (nested) {
+      const v = read(nested);
+      if (v) return v;
+    }
+    const link = el.querySelector?.('a[href*="steampowered.com/app/"]');
+    if (link) {
+      const m = link.getAttribute('href').match(/\/app\/(\d+)/);
+      if (m) return Number(m[1]);
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Badge rendering
+  // ---------------------------------------------------------------------------
+
+  const STEAM_MARK = 'M11.98 0C5.67 0 .5 4.87 0 11.05l6.44 2.66a3.4 3.4 0 0 1 1.9-.59l2.87-4.15v-.06a4.55 4.55 0 1 1 4.55 4.55h-.11l-4.09 2.92c0 .05.01.1.01.15a3.42 3.42 0 0 1-6.78.66L.06 15.3A12 12 0 1 0 11.98 0zm-4.4 18.2l-1.48-.61a2.57 2.57 0 0 0 4.74-1.4 2.56 2.56 0 0 0-3.53-2.38l1.53.63a1.89 1.89 0 1 1-1.45 3.49l.19.08zm11.3-9.23a3.03 3.03 0 1 0-6.06 0 3.03 3.03 0 0 0 6.06 0zm-5.3 0a2.28 2.28 0 1 1 4.55 0 2.28 2.28 0 0 1-4.56 0z';
+
+  function steamIcon(cls) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    if (cls) svg.setAttribute('class', cls);
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', STEAM_MARK);
+    path.setAttribute('fill', 'currentColor');
+    svg.appendChild(path);
+    return svg;
+  }
+
+  function makeBadge(match, variant) {
+    const badge = document.createElement('div');
+    badge.className = 'hbso-badge' + (variant ? ' hbso-badge--' + variant : '');
+    badge.appendChild(steamIcon('hbso-badge__icon'));
+    const label = document.createElement('span');
+    label.textContent = 'Owned on Steam';
+    badge.appendChild(label);
+    badge.title = match.name
+      ? `Owned on Steam as “${match.name}” (${match.how})`
+      : `Owned on Steam (${match.how})`;
+    return badge;
+  }
+
+  function badgeCard(card, adapter, match) {
+    const host = pick(card, adapter.anchor) || card;
+    const cs = getComputedStyle(host);
+    if (cs.position === 'static') host.style.position = 'relative';
+    host.appendChild(makeBadge(match, match.tier === 'likely' ? 'likely' : null));
+    card.classList.add('hbso-owned');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scanning
+  // ---------------------------------------------------------------------------
+
+  const state = { record: null, index: null, syncing: false, error: null, stats: { seen: 0, owned: 0 } };
+
+  function scan() {
+    if (!state.index) return;
+    let seen = 0, owned = 0;
+
+    for (const adapter of ADAPTERS) {
+      for (const cardSel of adapter.cards) {
+        document.querySelectorAll(cardSel).forEach(card => {
+          // Humble re-renders cards in place, which can wipe a badge without
+          // replacing the card element. Re-do the ones that lost theirs.
+          const done = card.dataset.hbso === '1';
+          const lostBadge = card.dataset.hbsoOwned === '1' && !card.querySelector('.hbso-badge');
+          if (done && !lostBadge) return;
+
+          const titleEl = pick(card, adapter.titles);
+          const title = titleEl && titleEl.textContent.trim();
+          if (!title) return;
+
+          card.dataset.hbso = '1';
+          if (!done) seen++;
+
+          const match = matchProduct(state.index, title, extractAppId(card));
+          if (match) {
+            badgeCard(card, adapter, match);
+            card.dataset.hbsoOwned = '1';
+            if (!done) owned++;
+          }
+        });
+      }
+    }
+
+    scanProductPage();
+
+    if (seen) {
+      state.stats.seen += seen;
+      state.stats.owned += owned;
+      log(`scanned ${seen} new item(s), ${owned} owned`);
+      renderPanel();
+    }
+  }
+
+  /** Single-product store pages get one badge next to the title. */
+  function scanProductPage() {
+    if (!/^\/store\/[^/]+\/?$/.test(location.pathname)) return;
+    if (/^\/store\/(search|subscription)/.test(location.pathname)) return;
+
+    const heading = document.querySelector('.product-detail-view h1, .human-name, h1.heading-medium, h1');
+    if (!heading || heading.dataset.hbso) return;
+
+    const title = heading.textContent.trim();
+    if (!title) return;
+    heading.dataset.hbso = '1';
+
+    const match = matchProduct(state.index, title, extractAppId(document.body));
+    if (!match) return;
+
+    const badge = makeBadge(match, 'inline');
+    heading.insertAdjacentElement('afterend', badge);
+  }
+
+  function rescanAll() {
+    document.querySelectorAll('[data-hbso]').forEach(el => {
+      delete el.dataset.hbso;
+      delete el.dataset.hbsoOwned;
+    });
+    document.querySelectorAll('.hbso-badge').forEach(el => el.remove());
+    document.querySelectorAll('.hbso-owned').forEach(el => el.classList.remove('hbso-owned'));
+    state.stats = { seen: 0, owned: 0 };
+    scan();
+  }
+
+  let scanTimer = null;
+  function scheduleScan() {
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(scan, SCAN_DEBOUNCE);
+  }
+
+  function startObserver() {
+    new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
+
+    // Humble is a SPA. On navigation, clear everything and start over — React
+    // reuses nodes, so a stale badge can otherwise outlive the product it named.
+    let lastPath = location.pathname;
+    setInterval(() => {
+      if (location.pathname === lastPath) return;
+      lastPath = location.pathname;
+      rescanAll();
+    }, 700);
+  }
+
+  // ---------------------------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------------------------
+
+  const els = {};
+
+  function h(tag, props = {}, ...children) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (v != null) el.setAttribute(k, v);
+    }
+    for (const c of children) if (c) el.appendChild(c);
+    return el;
+  }
+
+  function formatCount(n) { return Number(n).toLocaleString(); }
+
+  function formatAgo(ts) {
+    if (!ts) return 'never';
+    const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (secs < 60)    return 'just now';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60)    return mins + (mins === 1 ? ' minute ago' : ' minutes ago');
+    const hours = Math.floor(mins / 60);
+    if (hours < 24)   return hours + (hours === 1 ? ' hour ago' : ' hours ago');
+    const days = Math.floor(hours / 24);
+    return days + (days === 1 ? ' day ago' : ' days ago');
+  }
+
+  function mountUI() {
+    els.launcher = h('button', {
+      class: 'hbso-launcher',
+      type: 'button',
+      title: 'Steam ownership',
+      onclick: togglePanel,
+    });
+    els.launcher.appendChild(steamIcon('hbso-launcher__icon'));
+    els.launcherLabel = h('span', { class: 'hbso-launcher__label' });
+    els.launcher.appendChild(els.launcherLabel);
+
+    els.panel = h('div', { class: 'hbso-panel', hidden: '' });
+    els.root = h('div', { class: 'hbso-root' }, els.panel, els.launcher);
+    document.body.appendChild(els.root);
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !els.panel.hidden) closePanel();
+    });
+    document.addEventListener('click', e => {
+      if (!els.panel.hidden && !els.root.contains(e.target)) closePanel();
+    });
+
+    renderPanel();
+  }
+
+  function togglePanel() { els.panel.hidden ? openPanel() : closePanel(); }
+  function openPanel()  { els.panel.hidden = false; renderPanel(); }
+  function closePanel() { els.panel.hidden = true; }
+
+  function renderPanel() {
+    if (!els.panel) return;
+    const rec = state.record;
+
+    els.launcher.classList.toggle('hbso-launcher--connected', !!rec);
+    els.launcherLabel.textContent =
+      state.syncing            ? 'Syncing…' :
+      !rec                     ? 'Connect Steam' :
+      state.stats.owned > 0    ? `${formatCount(state.stats.owned)} owned here` :
+                                 'Steam library';
+
+    els.panel.textContent = '';
+    els.panel.appendChild(rec ? connectedView(rec) : connectView());
+  }
+
+  function connectView() {
+    const body = h('div', { class: 'hbso-panel__body' });
+
+    body.appendChild(h('h2', { class: 'hbso-title', text: 'Connect your Steam library' }));
+    body.appendChild(h('p', { class: 'hbso-copy', text:
+      'Sign in to Steam in this browser, then connect. Your library is read from ' +
+      'your own Steam session — no API key, no profile URL, and private libraries work too.' }));
+
+    if (state.error) {
+      body.appendChild(h('div', { class: 'hbso-alert' },
+        h('strong', { text: state.error.title }),
+        h('span', { text: state.error.detail })));
+    }
+
+    const connect = h('button', {
+      class: 'hbso-btn hbso-btn--primary', type: 'button',
+      text: state.syncing ? 'Connecting…' : 'Connect Steam',
+      onclick: () => refresh({ interactive: true }),
+    });
+    if (state.syncing) connect.disabled = true;
+
+    body.appendChild(h('div', { class: 'hbso-actions' }, connect));
+    body.appendChild(h('a', {
+      class: 'hbso-link', href: URL_LOGIN, target: '_blank', rel: 'noopener',
+      text: 'Not signed in? Open Steam →',
+    }));
+    body.appendChild(h('p', { class: 'hbso-fineprint', text:
+      'Your library never leaves this browser.' }));
+    return body;
+  }
+
+  function connectedView(rec) {
+    const body = h('div', { class: 'hbso-panel__body' });
+
+    body.appendChild(h('div', { class: 'hbso-status' },
+      h('span', { class: 'hbso-check', text: '✓' }),
+      h('span', { text: 'Steam connected' })));
+
+    if (rec.persona) {
+      body.appendChild(h('p', { class: 'hbso-persona', text: rec.persona }));
+    }
+    body.appendChild(h('p', { class: 'hbso-count', text: `${formatCount(rec.games.length)} games found` }));
+    body.appendChild(h('p', { class: 'hbso-sub', text: `Last synced: ${formatAgo(rec.syncedAt)}` }));
+    body.appendChild(h('p', { class: 'hbso-sub', text:
+      `${formatCount(state.stats.owned)} of ${formatCount(state.stats.seen)} items on this page` }));
+
+    if (state.error) {
+      body.appendChild(h('div', { class: 'hbso-alert' },
+        h('strong', { text: state.error.title }),
+        h('span', { text: state.error.detail })));
+    }
+
+    const refreshBtn = h('button', {
+      class: 'hbso-btn', type: 'button',
+      text: state.syncing ? 'Refreshing…' : 'Refresh library',
+      onclick: () => refresh({ interactive: true }),
+    });
+    if (state.syncing) refreshBtn.disabled = true;
+
+    const disconnect = h('button', {
+      class: 'hbso-btn hbso-btn--ghost', type: 'button', text: 'Disconnect',
+      onclick: disconnectLibrary,
+    });
+
+    body.appendChild(h('div', { class: 'hbso-actions' }, refreshBtn, disconnect));
+    body.appendChild(h('p', { class: 'hbso-fineprint', text:
+      'To use a different account, switch accounts on Steam, then refresh.' }));
+    return body;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Actions
+  // ---------------------------------------------------------------------------
+
+  async function refresh({ interactive = false, silent = false } = {}) {
+    if (state.syncing) return;
+    state.syncing = true;
+    state.error = null;
+    if (interactive) openPanel(); else renderPanel();
+
+    try {
+      const rec = await syncLibrary();
+      state.record = rec;
+      state.index = buildIndex(rec);
+      rescanAll();
+    } catch (err) {
+      if (err instanceof NotSignedInError) {
+        state.error = {
+          title: 'You are not signed in to Steam. ',
+          detail: 'Open Steam in another tab, sign in, then try again.',
+        };
+      } else {
+        state.error = { title: 'Could not reach Steam. ', detail: err.message };
+      }
+      if (!silent) warn('sync failed:', err);
+    } finally {
+      state.syncing = false;
+      renderPanel();
+      if (state.error && interactive) openPanel();
+    }
+  }
+
+  async function disconnectLibrary() {
+    await storageDel(STORE_KEY);
+    state.record = null;
+    state.index = null;
+    state.error = null;
+    state.stats = { seen: 0, owned: 0 };
+    document.querySelectorAll('.hbso-badge').forEach(el => el.remove());
+    document.querySelectorAll('[data-hbso]').forEach(el => {
+      delete el.dataset.hbso;
+      delete el.dataset.hbsoOwned;
+    });
+    document.querySelectorAll('.hbso-owned').forEach(el => el.classList.remove('hbso-owned'));
+    renderPanel();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Console helpers — `hbso.diagnose()` etc.
+  // ---------------------------------------------------------------------------
+
+  const api = {
+    version: VERSION,
+    get record() { return state.record; },
+    sync: () => refresh({ interactive: false }),
+    rescan: rescanAll,
+    reset: disconnectLibrary,
+    normalize,
+    match: (title, appid) => state.index ? matchProduct(state.index, title, appid) : null,
+    diagnose() {
+      const rows = [];
+      for (const adapter of ADAPTERS) {
+        for (const sel of adapter.cards) {
+          const nodes = document.querySelectorAll(sel);
+          if (!nodes.length) { rows.push({ adapter: adapter.name, selector: sel, cards: 0, titled: 0, sample: '' }); continue; }
+          let titled = 0, sample = '';
+          nodes.forEach(n => {
+            const t = pick(n, adapter.titles);
+            if (t && t.textContent.trim()) { titled++; if (!sample) sample = t.textContent.trim(); }
+          });
+          rows.push({ adapter: adapter.name, selector: sel, cards: nodes.length, titled, sample });
+        }
+      }
+      console.table(rows);
+      console.log(LOG, 'library:', state.record ? state.record.games.length + ' games' : 'not connected',
+        '| badged on this page:', state.stats.owned, '/', state.stats.seen);
+      return rows;
+    },
+    unmatched() {
+      if (!state.index) return [];
+      const out = [];
+      for (const adapter of ADAPTERS) {
+        for (const sel of adapter.cards) {
+          document.querySelectorAll(sel).forEach(card => {
+            const t = pick(card, adapter.titles);
+            const title = t && t.textContent.trim();
+            if (title && !matchProduct(state.index, title, extractAppId(card))) {
+              out.push({ title, normalized: normalize(title), base: baseKey(title) });
+            }
+          });
+        }
+      }
+      console.table(out);
+      return out;
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Styles
+  // ---------------------------------------------------------------------------
+
+  const CSS = `
+.hbso-badge{
+  position:absolute; top:8px; left:8px; z-index:30;
+  display:inline-flex; align-items:center; gap:5px;
+  padding:3px 7px; border-radius:3px;
+  background:rgba(23,40,56,.94);
+  color:#66c0f4;
+  border:1px solid rgba(102,192,244,.5);
+  font:700 9.5px/1.25 "Nunito Sans","Brandon Text",system-ui,-apple-system,sans-serif;
+  letter-spacing:.075em; text-transform:uppercase; white-space:nowrap;
+  box-shadow:0 1px 6px rgba(0,0,0,.45);
+  pointer-events:auto;
+}
+.hbso-badge__icon{width:11px;height:11px;flex:0 0 auto;opacity:.95}
+.hbso-badge--likely{color:#a7cfe4;border-color:rgba(167,207,228,.4);border-style:dashed}
+.hbso-badge--inline{position:static;margin:10px 0 0;display:inline-flex}
+
+.hbso-root{position:fixed;right:18px;bottom:18px;z-index:2147483000;
+  font-family:"Nunito Sans","Brandon Text",system-ui,-apple-system,sans-serif}
+
+.hbso-launcher{
+  display:flex;align-items:center;gap:7px;margin-left:auto;
+  padding:8px 13px;border-radius:999px;cursor:pointer;
+  background:#1b2838;color:#c7d5e0;border:1px solid rgba(102,192,244,.35);
+  font:600 12px/1 inherit;box-shadow:0 4px 14px rgba(0,0,0,.4);
+  transition:background .15s ease,border-color .15s ease;
+}
+.hbso-launcher:hover{background:#24384d;border-color:rgba(102,192,244,.7)}
+.hbso-launcher__icon{width:15px;height:15px;color:#66c0f4}
+.hbso-launcher--connected .hbso-launcher__icon{color:#5ba32b}
+
+.hbso-panel{
+  width:288px;margin-bottom:10px;border-radius:8px;overflow:hidden;
+  background:#12212f;border:1px solid rgba(102,192,244,.22);
+  box-shadow:0 12px 34px rgba(0,0,0,.55);color:#c7d5e0;
+}
+.hbso-panel[hidden]{display:none}
+.hbso-panel__body{padding:16px}
+
+.hbso-title{margin:0 0 7px;font-size:14px;font-weight:700;color:#fff}
+.hbso-copy{margin:0 0 13px;font-size:11.5px;line-height:1.55;color:#8fa3b5}
+.hbso-status{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:#fff}
+.hbso-check{color:#5ba32b;font-size:15px}
+.hbso-persona{margin:7px 0 0;font-size:12px;color:#66c0f4;font-weight:600}
+.hbso-count{margin:4px 0 0;font-size:12.5px;color:#c7d5e0}
+.hbso-sub{margin:2px 0 0;font-size:11px;color:#7f93a5}
+
+.hbso-actions{display:flex;gap:8px;margin-top:14px}
+.hbso-btn{
+  flex:1;padding:8px 10px;border-radius:4px;cursor:pointer;
+  background:#2a475e;color:#c7d5e0;border:1px solid transparent;
+  font:600 11.5px/1 inherit;transition:background .15s ease;
+}
+.hbso-btn:hover:not(:disabled){background:#35566f}
+.hbso-btn:disabled{opacity:.6;cursor:default}
+.hbso-btn--primary{background:#66c0f4;color:#0d1b26}
+.hbso-btn--primary:hover:not(:disabled){background:#8ed2fb}
+.hbso-btn--ghost{flex:0 0 auto;background:transparent;border-color:rgba(199,213,224,.25);color:#8fa3b5}
+.hbso-btn--ghost:hover{background:rgba(199,213,224,.08)}
+
+.hbso-link{display:inline-block;margin-top:11px;font-size:11.5px;color:#66c0f4;text-decoration:none}
+.hbso-link:hover{text-decoration:underline}
+.hbso-fineprint{margin:11px 0 0;font-size:10.5px;line-height:1.5;color:#6b7f91}
+.hbso-alert{
+  margin:0 0 12px;padding:9px 10px;border-radius:4px;
+  background:rgba(214,92,74,.12);border:1px solid rgba(214,92,74,.4);
+  font-size:11px;line-height:1.5;color:#e6b0a6;
+}
+.hbso-alert strong{color:#f0c4bb;font-weight:700}
+`;
+
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+
+  async function init() {
+    addStyle(CSS);
+
+    const rec = await loadRecord();
+    if (rec) {
+      state.record = rec;
+      state.index = buildIndex(rec);
+    }
+
+    mountUI();
+    startObserver();
+    scan();
+
+    if (rec && Date.now() - rec.syncedAt > STALE_AFTER) {
+      log('library is stale, refreshing in the background');
+      refresh({ silent: true });
+    }
+
+    try {
+      Object.defineProperty(window, 'hbso', { value: api, configurable: true });
+    } catch { window.hbso = api; }
+
+    log(`v${VERSION} ready.`, rec ? `${rec.games.length} games loaded.` : 'Not connected yet.');
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init, { once: true });
+  } else {
+    init();
+  }
+})();
