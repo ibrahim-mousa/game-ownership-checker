@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.3.0
+// @version      2.3.1
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -46,7 +46,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.3.0';
+  const VERSION       = '2.3.1';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -336,37 +336,41 @@
    * parser can be fixed without asking anyone to go spelunking in devtools.
    */
   function describeMarkup(html) {
-    const markers = [
-      'gameslist_config', 'data-profile-gameslist', 'rgGames', 'g_rgProfileData',
-      'GetOwnedGames', 'IPlayerService', 'webapi_token', 'access_token',
-      'games_list_tab', 'responsive_page_template_content', 'application/json',
-    ];
     const uniq = arr => Array.from(new Set(arr));
     const grab = (re, group) => uniq(Array.from(html.matchAll(re)).map(m => m[group]));
+    const tidy = str => str.replace(/\s+/g, ' ').trim();
 
     const title = html.match(/<title>([\s\S]{0,200}?)<\/title>/i);
-    const appidHits = (html.match(/"?appid"?\s*[:=]/gi) || []).length;
 
-    // A window around the first few appids says more than any marker list.
-    const samples = [];
-    const probe = /"?appid"?\s*[:=]/gi;
-    let m;
-    while ((m = probe.exec(html)) !== null && samples.length < 3) {
-      samples.push(html.slice(Math.max(0, m.index - 90), m.index + 130).replace(/\s+/g, ' '));
-      probe.lastIndex += 2000;
-    }
+    // Where does the weight actually sit? The biggest script blocks usually
+    // hold the payload, whatever key names it uses.
+    const scripts = Array.from(html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi))
+      .map(m => ({ attrs: tidy(m[1]).slice(0, 70), len: m[2].length, head: tidy(m[2].slice(0, 140)) }))
+      .sort((a, b) => b.len - a.len)
+      .slice(0, 5);
+
+    // Appids hide in CDN image paths even when no JSON key names them.
+    const cdnIds = grab(/steam\/apps\/(\d+)/g, 1);
+    const linkIds = grab(/\/app\/(\d+)/g, 1);
+
+    const probes = [
+      'app_id', 'appid', 'appId', '"id":', '"name":', 'capsule', 'header.jpg',
+      'library_600x900', 'window.__', 'self.__', 'INITIAL_STATE', 'application/json',
+      'g_rgProfileData', 'rgGames', 'IPlayerService', 'webapi_token', 'access_token',
+    ];
 
     return {
       length: html.length,
-      title: title ? title[1].trim() : '(no <title>)',
-      opensWith: html.slice(0, 180).replace(/\s+/g, ' '),
-      appidHits,
-      samples,
-      markers: markers.filter(x => html.includes(x)),
-      gameIds: grab(/id="([^"]*game[^"]*)"/gi, 1).slice(0, 10),
-      bigDataAttrs: grab(/\s(data-[a-z-]+)="[^"]{200,}"/gi, 1).slice(0, 10),
-      jsonScriptIds: grab(/<script[^>]*id="([^"]+)"[^>]*>/gi, 1).slice(0, 10),
-      bigVars: grab(/(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[[{][^;]{200,}/g, 1).slice(0, 10),
+      title: title ? tidy(title[1]) : '(no <title>)',
+      opensWith: tidy(html.slice(0, 180)),
+      scriptCount: (html.match(/<script/gi) || []).length,
+      biggestScripts: scripts.map(x => `len=${x.len} <script ${x.attrs}> ${x.head}`),
+      cdnAppIds: `${cdnIds.length} unique (e.g. ${cdnIds.slice(0, 6).join(', ') || 'none'})`,
+      storeLinkIds: `${linkIds.length} unique (e.g. ${linkIds.slice(0, 6).join(', ') || 'none'})`,
+      probesFound: probes.filter(x => html.includes(x)),
+      gameIds: grab(/id="([^"]*game[^"]*)"/gi, 1).slice(0, 8),
+      bigDataAttrs: grab(/\s(data-[a-z-]+)="[^"]{200,}"/gi, 1).slice(0, 8),
+      bigVars: grab(/(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*[[{][^;]{200,}/g, 1).slice(0, 8),
     };
   }
 
@@ -1077,13 +1081,15 @@
         `length: ${hints.length}`,
         `title: ${hints.title}`,
         `opens with: ${hints.opensWith}`,
-        `"appid" hits: ${hints.appidHits}`,
-        `markers: ${hints.markers.join(', ') || 'none'}`,
+        `scripts: ${hints.scriptCount}`,
+        `cdn appids: ${hints.cdnAppIds}`,
+        `store link appids: ${hints.storeLinkIds}`,
+        `probes found: ${hints.probesFound.join(', ') || 'none'}`,
         `game ids: ${hints.gameIds.join(', ') || 'none'}`,
         `big data attrs: ${hints.bigDataAttrs.join(', ') || 'none'}`,
-        `json script ids: ${hints.jsonScriptIds.join(', ') || 'none'}`,
         `big vars: ${hints.bigVars.join(', ') || 'none'}`,
-        ...(hints.samples.length ? ['samples:', ...hints.samples.map(x => '  ' + x)] : []),
+        'biggest scripts:',
+        ...hints.biggestScripts.map(x => '  ' + x),
       ];
       wrap.appendChild(h('p', { class: 'hbso-diag__label', text: 'Page structure' }));
       wrap.appendChild(h('pre', { class: 'hbso-diag__pre', text: lines.join('\n') }));
