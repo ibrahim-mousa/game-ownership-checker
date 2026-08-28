@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.0.2
+// @version      2.0.3
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -46,7 +46,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.0.2';
+  const VERSION       = '2.0.3';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -701,8 +701,17 @@
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape' && !els.panel.hidden) closePanel();
     });
+    // Decide inside-vs-outside during the CAPTURE phase. By the time a click
+    // bubbles back up to document, a button's own handler may have re-rendered
+    // the panel and detached the button — an orphaned node is inside nothing,
+    // so a bubble-phase containment check reads it as an outside click and
+    // closes the panel underneath the user.
+    let clickedInside = false;
     document.addEventListener('click', e => {
-      if (!els.panel.hidden && !els.root.contains(e.target)) closePanel();
+      clickedInside = els.root.contains(e.target);
+    }, true);
+    document.addEventListener('click', () => {
+      if (!els.panel.hidden && !clickedInside) closePanel();
     });
 
     renderPanel();
