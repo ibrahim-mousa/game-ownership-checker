@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.5.0
+// @version      2.5.1
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.5.0';
+  const VERSION       = '2.5.1';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -995,8 +995,23 @@
     return badge;
   }
 
+  // Void elements cannot have children. appendChild() on an <img> succeeds in
+  // the DOM API and silently renders nothing, so a badge parented to one is
+  // created, counted, and invisible. Image containers and images share naming
+  // conventions ('.entity-image-container' vs '.entity-image'), which makes
+  // this very easy to hit.
+  const VOID_TAGS = /^(?:img|input|br|hr|source|track|area|base|col|embed|link|meta|param|wbr)$/i;
+
+  function badgeHost(card, adapter) {
+    for (const sel of adapter.anchor) {
+      const el = card.querySelector(sel);
+      if (el && !VOID_TAGS.test(el.tagName)) return el;
+    }
+    return card;
+  }
+
   function badgeCard(card, adapter, match) {
-    const host = pick(card, adapter.anchor) || card;
+    const host = badgeHost(card, adapter);
     const cs = getComputedStyle(host);
     if (cs.position === 'static') host.style.position = 'relative';
     host.appendChild(makeBadge(match, match.tier === 'likely' ? 'likely' : null));
@@ -1470,6 +1485,30 @@
 
     /** Tests both Steam hosts and prints a verdict. */
     debugAll: () => runConnectionTest(),
+
+    /** Reports every badge in the page: where it is, and whether it renders. */
+    badges() {
+      const rows = Array.from(document.querySelectorAll('.hbso-badge')).map(el => {
+        const rect = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        const host = el.parentElement;
+        return {
+          label: el.textContent.trim().slice(0, 24),
+          host: host ? host.tagName.toLowerCase() + (host.className ? '.' + String(host.className).split(/\s+/)[0] : '') : '(detached)',
+          hostVoid: host ? VOID_TAGS.test(host.tagName) : null,
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          visible: rect.width > 0 && rect.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none',
+          position: cs.position,
+          zIndex: cs.zIndex,
+          hostOverflow: host ? getComputedStyle(host).overflow : null,
+        };
+      });
+      console.table(rows);
+      const shown = rows.filter(r => r.visible).length;
+      console.log(LOG, `${rows.length} badge(s) in the DOM, ${shown} actually rendering`);
+      return rows;
+    },
 
     diagnose() {
       const rows = [];
