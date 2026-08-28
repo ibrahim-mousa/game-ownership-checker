@@ -14,7 +14,7 @@ const { loadUserscript } = require('./load');
 
 const M = loadUserscript([
   'normalize', 'preClean', 'tighten', 'stripEditions',
-  'romanize', 'exactKeys', 'editionKeys', 'buildIndex', 'matchProduct', 'ALIASES',
+  'romanize', 'spellings', 'exactKeys', 'editionKeys', 'buildIndex', 'matchProduct', 'ALIASES',
 ]);
 
 let passed = 0;
@@ -205,6 +205,43 @@ for (const [title, want, why] of CASES) {
   const exact = M.matchProduct(ownsBase, 'Borderlands 2', null);
   check('exact  a true title match stays certain',
     exact && exact.tier === 'exact' && exact.certain === true);
+}
+
+// --- Stores disagree about spacing -------------------------------------------
+//
+// Steam sells "HunterX" (app 1918450); a Humble bundle lists it as "Hunter X".
+// Whitespace is no more meaningful in a title than the punctuation normalize()
+// already strips, so both spellings are indexed.
+{
+  const owned = M.buildIndex({
+    ownedAppIds: [],
+    games: [
+      [1918450, 'HunterX'],
+      [413150,  'Stardew Valley'],
+      [220,     'Half-Life 2'],
+    ],
+  });
+
+  for (const [title, why] of [
+    ['Hunter X',        'Humble adds a space Steam does not have'],
+    ['HunterX',         'identical spelling still works'],
+    ['Hunter  X',       'doubled whitespace'],
+    ['Half Life 2',     'hyphen dropped as well as respaced'],
+    ['Stardew Valley',  'ordinary titles are unaffected'],
+  ]) {
+    check(`spacing ${title}`, Boolean(M.matchProduct(owned, title, null)), why);
+  }
+
+  // Squashing spaces must not make unrelated titles collide.
+  check('-      Hunter Y still does not match', !M.matchProduct(owned, 'Hunter Y', null));
+  check('-      Hunter still does not match',   !M.matchProduct(owned, 'Hunter', null));
+
+  // The variant is additive, never a replacement.
+  const keys = M.exactKeys('Hunter X');
+  check('keeps both the spaced and squashed spellings',
+    keys.includes('hunter x') && keys.includes('hunterx'), keys.join(', '));
+  check('adds nothing extra for a single-word title',
+    M.exactKeys('Noita').length === 1, M.exactKeys('Noita').join(', '));
 }
 
 // --- Aliases carry what the matcher deliberately will not guess -------------

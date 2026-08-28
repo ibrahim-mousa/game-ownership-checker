@@ -68,8 +68,8 @@ human has checked it. You can review an alias — you cannot easily review a
 heuristic. A missing badge is a much better failure than a wrong one.
 
 Normalising strips `™ ® © ℠`, accents, apostrophes and punctuation, expands `&`,
-converts multi-letter roman numerals (`VI` → `6`), and removes trailing edition
-names. A bare qualifier is only stripped when unambiguous (`GOTY`,
+converts multi-letter roman numerals (`VI` → `6`), ignores spacing differences
+(Steam's `HunterX` is Humble's `Hunter X`), and removes trailing edition names. A bare qualifier is only stripped when unambiguous (`GOTY`,
 `Remastered`); otherwise the word *Edition* must actually be present — which is
 what stops `Persona 5 Royal` collapsing to `Persona 5`, and `Portal Reloaded`
 to `Portal`.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.1.0
+// @version      3.2.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.1.0';
+  const VERSION       = '3.2.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -813,15 +813,32 @@
   const NON_OWNERSHIP =
     /\b(?:demo|playtest|play test|open beta|closed beta|beta test|public test|test server|dedicated server|benchmark)\b/i;
 
-  /** Spellings that mean the same title: the name itself, plus roman numerals. */
+  /**
+   * Every spelling of one normalised string that means the same title.
+   *
+   * Covers roman numerals, and spacing: stores disagree about where the spaces
+   * go, so Steam's "HunterX" is Humble's "Hunter X". Two titles that differ only
+   * in whitespace are the same product -- whitespace is no more meaningful here
+   * than the punctuation normalize() already removes.
+   */
+  function spellings(norm) {
+    const out = new Set();
+    for (const form of [norm, romanize(norm)]) {
+      if (!form) continue;
+      out.add(form);
+      const squashed = form.replace(/ /g, '');
+      if (squashed && squashed !== form) out.add(squashed);
+    }
+    return Array.from(out);
+  }
+
+  /** Spellings of the title as written. */
   function exactKeys(title) {
-    const base = normalize(title);
-    if (!base) return [];
-    return Array.from(new Set([base, romanize(base)]));
+    return spellings(normalize(title));
   }
 
   /**
-   * Spellings that remain once an edition suffix is removed. Kept apart from
+   * Spellings of what remains once an edition suffix is removed. Kept apart from
    * exactKeys so a "Deluxe Edition" match can never be reported as certain --
    * owning Borderlands 2 is not owning Borderlands 2 GOTY.
    */
@@ -829,7 +846,7 @@
     const base = normalize(title);
     const stripped = stripEditions(base);
     if (!stripped || stripped === base) return [];
-    return Array.from(new Set([stripped, romanize(stripped)]));
+    return spellings(stripped);
   }
 
   /** Both sets together. Used for reporting, not for deciding a tier. */
