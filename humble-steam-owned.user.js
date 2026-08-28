@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.8.0
+// @version      3.0.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.8.0';
+  const VERSION       = '3.0.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -67,20 +67,36 @@
   const warn = (...a) => console.warn(LOG, ...a);
 
   // ---------------------------------------------------------------------------
-  // Alias map - curated exceptions
+  // Alias map — curated exceptions
   // ---------------------------------------------------------------------------
   //
-  // Only needed when Humble and Steam disagree in a way normalisation cannot
-  // bridge (renames, regional titles, compilations). Keys are normalised Humble
-  // titles. Values are either a Steam appid (number, most precise) or a
-  // normalised Steam title (string).
+  // The matcher only does what it can justify: appid, exact title, and edition
+  // suffixes. Anything else a human decides here, so every non-obvious match in
+  // this script is one a reviewer can check.
   //
-  //   'pac man championship edition 2': 6000,
-  //   'grand theft auto v': 'grand theft auto v enhanced',
+  //   key    the Humble title, run through normalize()
+  //   value  a Steam appid (number, most precise), or a normalized Steam title
   //
-  // Contributions welcome - please include a note on why the pair is needed.
+  // To add one: open the Humble page, run hbso.unmatched() in the console and
+  // copy the `normalized` column as the key. Find the appid in the Steam store
+  // URL (store.steampowered.com/app/<APPID>/). Add a comment saying why.
+  // Please add a case to test/matcher.test.js too.
 
-  const ALIASES = Object.create(null);
+  const ALIASES = {
+    // Multi-copy bundles: owning the game covers the pack.
+    'among us 4 pack': 945360,                 // store.steampowered.com/app/945360
+    'ultimate chicken horse 4 pack': 386940,   // .../app/386940
+
+    // Steam keeps the year in the name and adds "40th Anniversary Edition",
+    // which no amount of suffix-stripping reconciles with Humble's wording.
+    'microsoft flight simulator 2020 premium deluxe edition': 1250410,
+
+    // Steam still lists the 2015 season as five episodes; Humble sells it whole.
+    'life is strange complete season': 319630, // "Life is Strange - Episode 1"
+
+    // Humble drops the subtitle Steam keeps.
+    'the witcher 3': 292030,                   // "The Witcher 3: Wild Hunt - Complete Edition"
+  };
 
   // ---------------------------------------------------------------------------
   // Userscript-manager shims (Violentmonkey / Tampermonkey / Greasemonkey)
@@ -719,7 +735,7 @@
     '(?:goty|game of the year|digital|deluxe|definitive|enhanced|complete|ultimate|' +
     'standard|premium|collectors?|anniversary|extended|special|gold|platinum|' +
     'legendary|day one|super|royal|ultra|essentials|extras|founders|supporter|' +
-    'limited|directors cut|remastered|remaster|redux)';
+    'limited|reloaded|directors cut|remastered|remaster|redux)';
 
   /**
    * A trailing edition suffix, e.g. "... Super Deluxe Edition".
@@ -738,9 +754,6 @@
       '|goty|game of the year|remastered|remaster|redux' +
     ')$'
   );
-
-  // Subtitles that mean "separate product", not "same game with a tagline".
-  const CONTENT_SUBTITLE = /\b(episode|episodes|chapter|part|expansion|dlc|season pass|add on|addon|prologue|soundtrack|ost|artbook|art book|bonus)\b/;
 
   // Products that are never the base game.
   const NON_GAME = /\b(soundtrack|ost|artbook|art book|season pass|expansion pass|wallpapers?|comic|digital book|strategy guide|manual)\b/;
@@ -824,28 +837,6 @@
     return Array.from(new Set([...exactKeys(title), ...editionKeys(title)]));
   }
 
-  /**
-   * The title with its subtitle removed - "The Witcher 3: Wild Hunt" -> "the witcher 3".
-   *
-   * Only returned when it is safe to compare against a *full* title:
-   *  - the base must contain a number, so franchise names ("batman", "fallout")
-   *    can never swallow a different entry in the series;
-   *  - the discarded subtitle must not name separate content ("Episode One").
-   * Returns null otherwise.
-   */
-  function baseKey(title) {
-    const pre = preClean(title);
-    const parts = pre.split(/\s*:\s*|\s+-\s+/);
-    if (parts.length < 2) return null;
-
-    const head = romanize(stripEditions(tighten(parts[0])));
-    const tail = tighten(parts.slice(1).join(' '));
-    if (!head || head.length < 3) return null;
-    if (!/\d/.test(head)) return null;
-    if (CONTENT_SUBTITLE.test(tail)) return null;
-    return head;
-  }
-
   // ---------------------------------------------------------------------------
   // Matching
   // ---------------------------------------------------------------------------
@@ -854,7 +845,6 @@
     const appIds = new Set((record.ownedAppIds || []).map(Number));
     const full = new Map();    // exact title -> steam name
     const edition = new Map(); // title minus its edition suffix -> steam name
-    const base = new Map();    // title minus its subtitle -> steam name
     let skipped = 0;
 
     for (const [appid, name] of record.games) {
@@ -865,12 +855,10 @@
 
       for (const k of exactKeys(name)) if (!full.has(k)) full.set(k, name);
       for (const k of editionKeys(name)) if (!edition.has(k)) edition.set(k, name);
-      const b = baseKey(name);
-      if (b && !base.has(b)) base.set(b, name);
     }
 
     if (skipped) log(`ignored ${skipped} demo/beta/playtest entries`);
-    return { appIds, full, edition, base, size: record.games.length };
+    return { appIds, full, edition, size: record.games.length };
   }
 
   /**
@@ -878,8 +866,10 @@
    *   1. appid    -> certain
    *   2. exact    -> the same title on both sides
    *   3. alias    -> curated
-   *   4. edition  -> same game, different edition (NOT proof you own this SKU)
-   *   5. likely   -> subtitle present on one side only
+   *   4. edition  -> same game, different edition
+   *
+   * Deliberately no fuzzy/subtitle matching. Anything normalisation cannot
+   * bridge belongs in ALIASES, where a human has checked it.
    */
   function matchProduct(index, title, appid) {
     if (appid && index.appIds.has(Number(appid))) {
@@ -906,15 +896,21 @@
       }
     }
 
-    // You own an edition of this game -- you do own the game itself.
+    // Direction matters. Here the STEAM name carries the edition suffix and the
+    // Humble title is the plain one, so you own a superset of what is on sale --
+    // an edition always includes the base game. Steam also renames base apps
+    // outright (292030 is now "The Witcher 3: Wild Hunt - Complete Edition"),
+    // so this is the common case, not an edge case. Certain.
     for (const k of exact) {
       if (index.edition.has(k)) {
-        return { tier: 'edition', how: 'you own an edition of this game',
-                 name: index.edition.get(k), certain: false };
+        return { tier: 'edition', how: 'you own an edition that includes this game',
+                 name: index.edition.get(k), certain: true };
       }
     }
 
-    // You own the plain game; this listing is a different edition of it.
+    // The other direction: the HUMBLE listing carries the edition suffix and you
+    // own the plain game. You own less than what is on sale, so this stays
+    // uncertain -- owning Borderlands 2 is not owning Borderlands 2 GOTY.
     const stripped = editionKeys(title);
     for (const k of stripped) {
       if (index.full.has(k)) {
@@ -925,19 +921,6 @@
         return { tier: 'edition', how: 'you own a different edition of this game',
                  name: index.edition.get(k), certain: false };
       }
-    }
-
-    // Humble has the subtitle, Steam does not (or vice versa).
-    for (const k of exact) {
-      if (index.base.has(k)) {
-        return { tier: 'likely', how: 'matched Steam base title',
-                 name: index.base.get(k), certain: false };
-      }
-    }
-    const b = baseKey(title);
-    if (b && index.full.has(b)) {
-      return { tier: 'likely', how: 'matched without subtitle',
-               name: index.full.get(b), certain: false };
     }
 
     return null;
@@ -1635,7 +1618,6 @@
               title,
               normalized: normalize(title),
               deEditioned: stripEditions(normalize(title)),
-              base: baseKey(title),
               href: cardHref(card).slice(0, 60),
             });
           });
