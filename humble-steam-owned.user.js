@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.7.0
+// @version      2.8.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.7.0';
+  const VERSION       = '2.8.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -787,14 +787,41 @@
     return norm.replace(/\b([ivx]{2,})\b/g, (m) => (ROMAN[m] != null ? String(ROMAN[m]) : m));
   }
 
-  /** Every normalised spelling of a title that we consider equivalent. */
-  function fullKeys(title) {
+  /**
+   * Library entries that are not ownership of the game.
+   *
+   * GetOwnedGames is called with include_played_free_games=1, so demos, open
+   * betas and playtests arrive as apps in their own right. Having played the
+   * "Street Fighter 6 Open Beta" is not owning Street Fighter 6.
+   *
+   * Deliberately specific: a bare /beta|alpha|trial/ would throw away real games
+   * such as Alpha Protocol.
+   */
+  const NON_OWNERSHIP =
+    /\b(?:demo|playtest|play test|open beta|closed beta|beta test|public test|test server|dedicated server|benchmark)\b/i;
+
+  /** Spellings that mean the same title: the name itself, plus roman numerals. */
+  function exactKeys(title) {
     const base = normalize(title);
     if (!base) return [];
-    const keys = new Set([base, stripEditions(base)]);
-    for (const k of Array.from(keys)) keys.add(romanize(k));
-    keys.delete('');
-    return Array.from(keys);
+    return Array.from(new Set([base, romanize(base)]));
+  }
+
+  /**
+   * Spellings that remain once an edition suffix is removed. Kept apart from
+   * exactKeys so a "Deluxe Edition" match can never be reported as certain --
+   * owning Borderlands 2 is not owning Borderlands 2 GOTY.
+   */
+  function editionKeys(title) {
+    const base = normalize(title);
+    const stripped = stripEditions(base);
+    if (!stripped || stripped === base) return [];
+    return Array.from(new Set([stripped, romanize(stripped)]));
+  }
+
+  /** Both sets together. Used for reporting, not for deciding a tier. */
+  function fullKeys(title) {
+    return Array.from(new Set([...exactKeys(title), ...editionKeys(title)]));
   }
 
   /**
@@ -825,55 +852,92 @@
 
   function buildIndex(record) {
     const appIds = new Set((record.ownedAppIds || []).map(Number));
-    const full = new Map(); // normalised full title -> steam name
-    const base = new Map(); // normalised base title -> steam name
+    const full = new Map();    // exact title -> steam name
+    const edition = new Map(); // title minus its edition suffix -> steam name
+    const base = new Map();    // title minus its subtitle -> steam name
+    let skipped = 0;
 
     for (const [appid, name] of record.games) {
       appIds.add(Number(appid));
-      for (const k of fullKeys(name)) if (!full.has(k)) full.set(k, name);
+
+      // A demo or open beta is a separate free app, not the game.
+      if (NON_OWNERSHIP.test(name)) { skipped++; continue; }
+
+      for (const k of exactKeys(name)) if (!full.has(k)) full.set(k, name);
+      for (const k of editionKeys(name)) if (!edition.has(k)) edition.set(k, name);
       const b = baseKey(name);
       if (b && !base.has(b)) base.set(b, name);
     }
-    return { appIds, full, base, size: record.games.length };
+
+    if (skipped) log(`ignored ${skipped} demo/beta/playtest entries`);
+    return { appIds, full, edition, base, size: record.games.length };
   }
 
   /**
    * Tiers, most trustworthy first:
-   *   1. appid            -> certain
-   *   2. exact normalised -> certain enough
-   *   3. alias            -> curated
-   *   4. subtitle/edition -> likely  (full<->base only, never base<->base)
+   *   1. appid    -> certain
+   *   2. exact    -> the same title on both sides
+   *   3. alias    -> curated
+   *   4. edition  -> same game, different edition (NOT proof you own this SKU)
+   *   5. likely   -> subtitle present on one side only
    */
   function matchProduct(index, title, appid) {
     if (appid && index.appIds.has(Number(appid))) {
-      return { tier: 'appid', how: 'Steam appid ' + appid, name: null };
+      return { tier: 'appid', how: 'Steam appid ' + appid, name: null, certain: true };
     }
     if (!title) return null;
     if (NON_GAME.test(normalize(title))) return null;
 
-    const keys = fullKeys(title);
+    const exact = exactKeys(title);
 
-    for (const k of keys) {
-      if (index.full.has(k)) return { tier: 'exact', how: 'exact title match', name: index.full.get(k) };
+    for (const k of exact) {
+      if (index.full.has(k)) {
+        return { tier: 'exact', how: 'exact title match', name: index.full.get(k), certain: true };
+      }
     }
 
     const alias = ALIASES[normalize(title)];
     if (alias != null) {
       if (typeof alias === 'number' && index.appIds.has(alias)) {
-        return { tier: 'alias', how: 'alias -> appid ' + alias, name: null };
+        return { tier: 'alias', how: 'alias -> appid ' + alias, name: null, certain: true };
       }
       if (typeof alias === 'string' && index.full.has(alias)) {
-        return { tier: 'alias', how: 'alias -> ' + alias, name: index.full.get(alias) };
+        return { tier: 'alias', how: 'alias -> ' + alias, name: index.full.get(alias), certain: true };
+      }
+    }
+
+    // You own an edition of this game -- you do own the game itself.
+    for (const k of exact) {
+      if (index.edition.has(k)) {
+        return { tier: 'edition', how: 'you own an edition of this game',
+                 name: index.edition.get(k), certain: false };
+      }
+    }
+
+    // You own the plain game; this listing is a different edition of it.
+    const stripped = editionKeys(title);
+    for (const k of stripped) {
+      if (index.full.has(k)) {
+        return { tier: 'edition', how: 'you own the base game, not this edition',
+                 name: index.full.get(k), certain: false };
+      }
+      if (index.edition.has(k)) {
+        return { tier: 'edition', how: 'you own a different edition of this game',
+                 name: index.edition.get(k), certain: false };
       }
     }
 
     // Humble has the subtitle, Steam does not (or vice versa).
-    for (const k of keys) {
-      if (index.base.has(k)) return { tier: 'likely', how: 'matched Steam base title', name: index.base.get(k) };
+    for (const k of exact) {
+      if (index.base.has(k)) {
+        return { tier: 'likely', how: 'matched Steam base title',
+                 name: index.base.get(k), certain: false };
+      }
     }
     const b = baseKey(title);
     if (b && index.full.has(b)) {
-      return { tier: 'likely', how: 'matched without subtitle', name: index.full.get(b) };
+      return { tier: 'likely', how: 'matched without subtitle',
+               name: index.full.get(b), certain: false };
     }
 
     return null;
@@ -984,14 +1048,25 @@
 
   function makeBadge(match, variant) {
     const badge = document.createElement('div');
-    badge.className = 'hbso-badge' + (variant ? ' hbso-badge--' + variant : '');
+    const classes = ['hbso-badge'];
+    if (variant) classes.push('hbso-badge--' + variant);
+    if (!match.certain) classes.push('hbso-badge--soft');
+    badge.className = classes.join(' ');
+
     badge.appendChild(steamIcon('hbso-badge__icon'));
+
     const label = document.createElement('span');
-    label.textContent = 'Owned on Steam';
+    // Only claim ownership when the titles actually matched. An edition or
+    // subtitle match means you own *a* version of this game, which is not the
+    // same as owning the product being sold.
+    label.textContent = match.certain ? 'Owned on Steam' : 'Base game owned';
     badge.appendChild(label);
-    badge.title = match.name
-      ? `Owned on Steam as “${match.name}” (${match.how})`
-      : `Owned on Steam (${match.how})`;
+
+    badge.title = (match.name
+      ? `Steam: “${match.name}”`
+      : 'Owned on Steam')
+      + `\n${match.how}`
+      + (match.certain ? '' : '\nThis is not necessarily the same edition.');
     return badge;
   }
 
@@ -1022,7 +1097,7 @@
     const host = badgeHost(card, adapter);
     const cs = getComputedStyle(host);
     if (cs.position === 'static') host.style.position = 'relative';
-    host.appendChild(makeBadge(match, match.tier === 'likely' ? 'likely' : null));
+    host.appendChild(makeBadge(match, null));
     card.classList.add('hbso-owned');
   }
 
@@ -1593,7 +1668,7 @@
   pointer-events:auto;
 }
 .hbso-badge__icon{width:11px;height:11px;flex:0 0 auto;opacity:.95}
-.hbso-badge--likely{color:#a7cfe4;border-color:rgba(167,207,228,.4);border-style:dashed}
+.hbso-badge--soft{color:#a7cfe4;border-color:rgba(167,207,228,.45);border-style:dashed}
 .hbso-badge--inline{position:static;margin:10px 0 0;display:inline-flex}
 
 .hbso-root{position:fixed;right:18px;bottom:18px;z-index:2147483000;
