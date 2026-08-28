@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.0.3
+// @version      2.0.4
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -46,7 +46,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.0.3';
+  const VERSION       = '2.0.4';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -54,6 +54,7 @@
   const REQ_TIMEOUT   = 30000;
 
   const URL_GAMES_XML = 'https://steamcommunity.com/my/games?tab=all&xml=1';
+  const URL_COMMUNITY = 'https://steamcommunity.com/';
   const URL_USERDATA  = 'https://store.steampowered.com/dynamicstore/userdata/';
   const URL_LOGIN     = 'https://store.steampowered.com/login/';
 
@@ -166,22 +167,49 @@
     });
   }
 
-  /** Turns two probe reports into a plain-English verdict. */
-  function interpretProbes(community, store) {
-    const blocked = r => !r.ok && !r.status;
-    if (community.ok && store.ok) {
-      return { level: 'ok', text: 'Both Steam hosts are reachable. The failure is in parsing, not the network — please send this output.' };
+  /**
+   * Turns the probe reports into a plain-English verdict.
+   *
+   * The key discriminator is `status`. A status of 0 means the request never
+   * completed at the network layer - DNS, TLS, or something refusing the
+   * connection. Any real HTTP status (403, 302, 429) means the network is fine
+   * and the problem is above it.
+   */
+  function interpretProbes(probes) {
+    const [root, feed, store] = probes;
+    const dead = r => !r.ok && !r.status;
+
+    if (dead(root) && dead(feed) && dead(store)) {
+      return { level: 'bad', text:
+        'Every host was blocked before leaving the browser. This is the userscript ' +
+        'manager or the extension\u2019s site-access setting, not Steam.' };
     }
-    if (blocked(community) && blocked(store)) {
-      return { level: 'bad', text: 'Both hosts blocked before leaving the browser. This is the userscript manager denying cross-origin access, not Steam.' };
+    if (dead(root) && dead(feed)) {
+      return { level: 'bad', text:
+        'steamcommunity.com is unreachable at the network layer while ' +
+        'store.steampowered.com works. That points at DNS, your ISP, a VPN, or a ' +
+        'firewall blocking the domain \u2014 not at this script. Try opening ' +
+        'https://steamcommunity.com/ in a normal tab: if that fails too, it is a ' +
+        'network block.' };
     }
-    if (blocked(community)) {
-      return { level: 'bad', text: 'Only steamcommunity.com is blocked — a stored per-domain denial, or an extension blocking that host.' };
+    if (root.ok && dead(feed)) {
+      return { level: 'bad', text:
+        'steamcommunity.com is reachable but the games feed specifically is being ' +
+        'blocked \u2014 almost always an extension filtering that URL. Try disabling ' +
+        'content blockers for steamcommunity.com.' };
     }
-    if (blocked(store)) {
-      return { level: 'warn', text: 'Only store.steampowered.com is blocked. Non-fatal: names still sync.' };
+    if (feed.ok && dead(store)) {
+      return { level: 'warn', text:
+        'Only store.steampowered.com is blocked. Non-fatal \u2014 names still sync.' };
     }
-    return { level: 'warn', text: 'Reached Steam but got an unexpected response. Check the status codes above.' };
+    if (root.ok && feed.ok) {
+      return { level: 'ok', text:
+        'Steam is reachable. The failure is in parsing, not the network \u2014 please ' +
+        'send this output.' };
+    }
+    return { level: 'warn', text:
+      'Mixed results. Check the status codes above; anything non-zero means the ' +
+      'network is fine.' };
   }
 
   function request(url) {
@@ -701,11 +729,8 @@
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape' && !els.panel.hidden) closePanel();
     });
-    // Decide inside-vs-outside during the CAPTURE phase. By the time a click
-    // bubbles back up to document, a button's own handler may have re-rendered
-    // the panel and detached the button — an orphaned node is inside nothing,
-    // so a bubble-phase containment check reads it as an outside click and
-    // closes the panel underneath the user.
+
+    // Prevent panel from closing when clicking a button inside
     let clickedInside = false;
     document.addEventListener('click', e => {
       clickedInside = els.root.contains(e.target);
@@ -822,14 +847,14 @@
 
     if (!state.test) return wrap;
 
-    const { community, store, verdict } = state.test;
+    const { probes, verdict } = state.test;
     const rows = h('div', { class: 'hbso-diag__rows' });
-    for (const r of [community, store]) {
+    for (const r of probes) {
       const status = r.ok ? `ok (${r.status})`
                    : r.status ? `${r.kind} (${r.status})`
                               : `blocked (${r.kind}, status 0)`;
       rows.appendChild(h('div', { class: 'hbso-diag__row' },
-        h('span', { class: 'hbso-diag__host', text: r.host }),
+        h('span', { class: 'hbso-diag__host', text: r.label || r.host }),
         h('span', { class: 'hbso-diag__state' + (r.ok ? ' is-ok' : ' is-bad'), text: status })));
     }
     wrap.appendChild(rows);
@@ -875,17 +900,23 @@
     state.test = null;
     renderPanel();
 
-    const community = await probeRequest(URL_GAMES_XML);
-    const store = await probeRequest(URL_USERDATA);
-    const verdict = interpretProbes(community, store);
+    // Probing the bare host as well as the endpoint separates "the domain is
+    // unreachable" from "this one URL is being filtered".
+    const probes = [];
+    for (const url of [URL_COMMUNITY, URL_GAMES_XML, URL_USERDATA]) {
+      probes.push(await probeRequest(url));
+    }
+    probes[0].label = 'steamcommunity.com';
+    probes[1].label = '  \u21b3 games feed';
+    probes[2].label = 'store.steampowered.com';
 
-    state.test = { community, store, verdict };
+    const verdict = interpretProbes(probes);
+    state.test = { probes, verdict };
     state.testing = false;
     renderPanel();
 
     console.log(LOG, 'connection test:', verdict.text);
-    console.log(LOG, 'steamcommunity.com ->', community);
-    console.log(LOG, 'store.steampowered.com ->', store);
+    for (const p of probes) console.log(LOG, p.url, '->', p);
     return state.test;
   }
 
