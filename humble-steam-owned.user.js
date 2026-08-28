@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.3.1
+// @version      2.4.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -12,6 +12,7 @@
 // @match        https://www.humblebundle.com/*
 // @connect      steamcommunity.com
 // @connect      store.steampowered.com
+// @connect      api.steampowered.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @grant        GM_getValue
@@ -46,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.3.1';
+  const VERSION       = '2.4.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -59,6 +60,7 @@
   const URL_DEEP_PATH = 'https://steamcommunity.com/login/home/';
   const URL_MY_REDIR  = 'https://steamcommunity.com/my/';
   const URL_USERDATA  = 'https://store.steampowered.com/dynamicstore/userdata/';
+  const URL_OWNED_API = 'https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/';
   const URL_LOGIN     = 'https://store.steampowered.com/login/';
 
   const log  = (...a) => console.log(LOG, ...a);
@@ -328,6 +330,9 @@
       catch (e) { warn('could not parse rgGames:', e.message); }
     }
 
+    const ssr = parseLoaderData(html);
+    if (ssr) return ssr;
+
     return scavengeGames(html);
   }
 
@@ -386,6 +391,95 @@
 
   function profileGamesUrl(steamId) {
     return `https://steamcommunity.com/profiles/${steamId}/games?tab=all`;
+  }
+
+  /**
+   * The web API token Steam embeds in its React pages.
+   *
+   * The payload is JSON-encoded inside a JS string, so the quotes around the
+   * key arrive escaped: {"strWebAPIToken\":\"eyJ...". Both forms are accepted.
+   */
+  function parseWebApiToken(html) {
+    const m = html.match(/strWebAPIToken\\?"\s*:\s*\\?"([A-Za-z0-9._~+/-]+=*)/);
+    return m ? m[1] : null;
+  }
+
+  /**
+   * Slices out a complete JS array/object literal starting at `start`.
+   *
+   * A lazy regex would work but has to walk ~15MB one character at a time on
+   * the games page. This is a single linear pass that respects string literals
+   * and escapes, so braces inside game titles cannot end the slice early.
+   */
+  function extractLiteral(src, start) {
+    let depth = 0, inString = false, escaped = false;
+    for (let i = start; i < src.length; i++) {
+      const c = src[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === '\\') escaped = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === '[' || c === '{') depth++;
+      else if (c === ']' || c === '}') {
+        depth--;
+        if (depth === 0) return src.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  /** Depth-limited hunt for an array of objects that look like games. */
+  function findGameArray(node, depth) {
+    depth = depth || 0;
+    if (depth > 8 || !node || typeof node !== 'object') return null;
+
+    if (Array.isArray(node)) {
+      const first = node[0];
+      if (first && typeof first === 'object' && 'appid' in first && 'name' in first) return node;
+      for (const item of node) {
+        const hit = findGameArray(item, depth + 1);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    for (const key of Object.keys(node)) {
+      const hit = findGameArray(node[key], depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /**
+   * Steam's React pages ship their state as `window.SSR.loaderData`: a JS array
+   * whose entries are themselves JSON *strings*, so everything inside is double
+   * encoded. Parse the outer array, then each entry, then hunt for the games.
+   */
+  function parseLoaderData(html) {
+    const marker = html.indexOf('window.SSR.loaderData');
+    if (marker === -1) return null;
+
+    const start = html.indexOf('[', marker);
+    if (start === -1) return null;
+
+    const literal = extractLiteral(html, start);
+    if (!literal) return null;
+
+    let outer;
+    try { outer = JSON.parse(literal); }
+    catch (e) { warn('could not parse SSR.loaderData:', e.message); return null; }
+
+    for (const entry of Array.isArray(outer) ? outer : []) {
+      let inner = entry;
+      if (typeof entry === 'string') {
+        try { inner = JSON.parse(entry); } catch { continue; }
+      }
+      const games = findGameArray(inner);
+      if (games) return games;
+    }
+    return null;
   }
 
   /**
@@ -449,35 +543,75 @@
    * indistinguishable from a blocked request. Retrying it as a fallback is
    * pointless: it cannot succeed. The HTML page is the only source.
    */
-  async function fetchGamesFeed() {
-    const tried = [];
+  /**
+   * Asks Steam for the library directly, using the web API token its own pages
+   * carry. This is the good path: a few KB of clean JSON with appids and names,
+   * complete regardless of how the games page lazy-loads on scroll.
+   */
+  async function fetchOwnedViaApi(token, steamId) {
+    const url = URL_OWNED_API +
+      '?access_token=' + encodeURIComponent(token) +
+      '&steamid=' + encodeURIComponent(steamId) +
+      '&include_appinfo=1&include_played_free_games=1&format=json';
 
-    // Fast path: one request, no lookup.
+    const res = await request(url);
+    if (res.status === 401 || res.status === 403) return null; // token expired
+
+    let data;
+    try { data = JSON.parse(res.text); }
+    catch { return null; }
+
+    const games = data && data.response && data.response.games;
+    if (!Array.isArray(games) || !games.length) return null;
+    return games;
+  }
+
+  /**
+   * Builds the library.
+   *
+   * Order matters. The games page is ~16MB on a large account, so it is fetched
+   * once and mined for two things: the web API token (preferred -- gives a
+   * complete list in a small follow-up request) and, failing that, the embedded
+   * SSR state.
+   */
+  async function fetchGamesFeed() {
+    const steamIdFromRoot = await resolveSteamId();
+
     let res = await request(URL_GAMES_HTML);
     if (looksLikeLoginPage(res)) throw new NotSignedInError();
-    tried.push('/my/games');
+
+    const identity = parseProfileIdentity(res.text);
+    const steamId = identity.steamId || steamIdFromRoot || '';
+
+    // Preferred: the API, via the token the page hands us.
+    const token = parseWebApiToken(res.text);
+    if (token && steamId) {
+      const viaApi = await fetchOwnedViaApi(token, steamId).catch(err => {
+        warn('web API call failed, falling back to page parsing:', err.message);
+        return null;
+      });
+      if (viaApi) {
+        log(`library via web API: ${viaApi.length} games`);
+        return { steamId, persona: identity.persona, games: normaliseRows(viaApi), source: 'api' };
+      }
+    }
+
+    // Fallback: mine the page we already downloaded.
     let rows = parseProfileGames(res.text);
 
-    // Fallback: resolve the profile and address it directly. `/my/` is a server
-    // side alias with known quirks -- it is the half of `/my/games?xml=1` that
-    // turns into a redirect loop -- while canonical profile URLs behave.
-    if (!rows) {
-      const steamId = await resolveSteamId();
-      if (steamId) {
-        res = await request(profileGamesUrl(steamId));
-        tried.push('/profiles/' + steamId + '/games');
-        if (!looksLikeLoginPage(res)) rows = parseProfileGames(res.text);
-      }
+    if (!rows && steamId) {
+      res = await request(profileGamesUrl(steamId));
+      if (!looksLikeLoginPage(res)) rows = parseProfileGames(res.text);
     }
 
     if (!rows) {
       throw new Error(
-        'Signed in, but the games list could not be read (tried ' + tried.join(', ') + '). ' +
-        'Steam may have changed its markup \u2014 please open an issue.');
+        'Signed in, but the games list could not be read. Steam may have changed ' +
+        'its markup \u2014 please open an issue with the page structure details.');
     }
 
-    const identity = parseProfileIdentity(res.text);
-    return { steamId: identity.steamId, persona: identity.persona, games: normaliseRows(rows) };
+    log(`library via page parsing: ${rows.length} games`);
+    return { steamId, persona: identity.persona, games: normaliseRows(rows), source: 'page' };
   }
 
   /** Reads the signed-in steamID64 off the community home page. */
