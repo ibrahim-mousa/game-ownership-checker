@@ -20,7 +20,7 @@ function check(name, ok, detail) {
 
 const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
                  'runConnectionTest', 'interpretProbes', 'buildIndex', 'isProductCard',
-                 'badgeHost', 'badgeCard', 'issueUrl', 'reportBody', 'refreshStats', 'scan'];
+                 'badgeHost', 'badgeCard', 'issueUrl', 'reportBody', 'refreshStats', 'scan', 'compareVersions', 'updateAvailable'];
 
 // --- Clicking a panel button must not close the panel ------------------------
 //
@@ -223,6 +223,30 @@ const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
   M.refreshStats();
   check('the count can go down as well as up',
     M.state.stats.owned === 1, `owned was ${M.state.stats.owned}`);
+}
+
+// --- Update notice ------------------------------------------------------------
+{
+  installGlobals();
+  const M = loadUserscript(EXPORTS);
+
+  check('compares versions numerically, not as strings',
+    M.compareVersions('3.9.0', '3.10.0') === -1, '3.10.0 must be newer than 3.9.0');
+  check('equal versions compare equal', M.compareVersions('3.3.0', '3.3.0') === 0);
+  check('older is older', M.compareVersions('3.2.1', '3.3.0') === -1);
+  check('newer is newer', M.compareVersions('4.0.0', '3.9.9') === 1);
+  check('missing segments count as zero', M.compareVersions('3.3', '3.3.0') === 0);
+
+  check('no notice before a check has run', !M.updateAvailable());
+
+  M.state.latestVersion = '99.0.0';
+  check('notice shows when a newer version exists', M.updateAvailable());
+
+  M.state.latestVersion = '0.0.1';
+  check('no notice for an older remote version', !M.updateAvailable());
+
+  M.state.latestVersion = '3.3.0';
+  check('no notice when already current', !M.updateAvailable());
 }
 
 // --- Connection-test verdicts ------------------------------------------------

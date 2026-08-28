@@ -27,6 +27,10 @@ so you never buy the same game twice.
 
 Your library is cached locally and refreshed automatically once a day.
 
+**Updates are automatic.** Your userscript manager polls the script and installs
+new versions. The panel also shows a one-line notice when a newer version is
+available, in case auto-update is off or hasn't run yet.
+
 ---
 
 ## Why no API key?
@@ -130,6 +134,16 @@ near the top of the script as an ordered list of candidate selectors, so fixing
 a page usually means adding one selector. Run `hbso.diagnose()` to see which
 selectors match on the page you are looking at.
 
+### Releasing
+
+Bump **`@version` in the metadata block and the `VERSION` constant together**,
+then push to `master`. That's the whole process — userscript managers poll
+`@updateURL` and install the new version.
+
+Ship a change without bumping `@version` and nobody ever receives it, silently
+and with no error anywhere. `test/meta.test.js` fails if the two version numbers
+disagree, and if any host the script fetches is missing from `@connect`.
+
 ### Running the tests
 
 No dependencies, no build step:
@@ -140,6 +154,7 @@ node test/run.js
 
 | Suite | Covers |
 | --- | --- |
+| [`meta.test.js`](test/meta.test.js) | release hygiene: version sync, update URLs, `@connect` coverage, grants |
 | [`matcher.test.js`](test/matcher.test.js) | normalisation, tiers, aliases — and the false positives each guard exists to prevent |
 | [`parser.test.js`](test/parser.test.js) | scraping Steam's profile page, both layouts, and the failure modes that must not look like an empty library |
 | [`panel.test.js`](test/panel.test.js) | the UI against a small DOM stub, including interaction bugs a syntax check cannot see |

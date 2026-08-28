@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.2.1
+// @version      3.3.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -13,6 +13,7 @@
 // @connect      steamcommunity.com
 // @connect      store.steampowered.com
 // @connect      api.steampowered.com
+// @connect      raw.githubusercontent.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @grant        GM_getValue
@@ -47,8 +48,10 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.2.1';
+  const VERSION       = '3.3.0';
   const STORE_KEY     = 'hbso.library.v1';
+  const UPDATE_KEY    = 'hbso.update.v1';
+  const UPDATE_EVERY  = 24 * 60 * 60 * 1000;
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
   const SCAN_DEBOUNCE = 250;
@@ -63,6 +66,7 @@
   const URL_OWNED_API = 'https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/';
   const URL_LOGIN     = 'https://store.steampowered.com/login/';
   const URL_ISSUES    = 'https://github.com/ibrahim-mousa/game-ownership-checker/issues/new';
+  const URL_SCRIPT    = 'https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/humble-steam-owned.user.js';
 
   const log  = (...a) => console.log(LOG, ...a);
   const warn = (...a) => console.warn(LOG, ...a);
@@ -720,6 +724,55 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Update check
+  // ---------------------------------------------------------------------------
+  //
+  // Userscript managers already poll @updateURL, but only about once a day and
+  // some users turn it off. This surfaces a new version in the panel so people
+  // are not silently stuck on an old build. It never nags: one line, one link,
+  // and the result is cached for a day.
+
+  /** -1 if a < b, 0 if equal, 1 if a > b. Numeric segments only. */
+  function compareVersions(a, b) {
+    const left = String(a).split('.').map(Number);
+    const right = String(b).split('.').map(Number);
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+      const x = left[i] || 0;
+      const y = right[i] || 0;
+      if (x !== y) return x < y ? -1 : 1;
+    }
+    return 0;
+  }
+
+  function updateAvailable() {
+    return state.latestVersion && compareVersions(VERSION, state.latestVersion) < 0;
+  }
+
+  async function checkForUpdate() {
+    try {
+      const cached = JSON.parse((await storageGet(UPDATE_KEY)) || 'null');
+      if (cached && Date.now() - cached.checkedAt < UPDATE_EVERY) {
+        state.latestVersion = cached.version;
+        return;
+      }
+
+      const res = await request(URL_SCRIPT);
+      const found = res.text.match(/^\/\/\s*@version\s+(\S+)/m);
+      if (!found) return;
+
+      state.latestVersion = found[1];
+      await storageSet(UPDATE_KEY, JSON.stringify({ version: found[1], checkedAt: Date.now() }));
+      if (updateAvailable()) {
+        log(`update available: ${VERSION} -> ${state.latestVersion}`);
+        renderPanel();
+      }
+    } catch (e) {
+      // Offline, rate-limited, blocked -- never let this affect anything.
+      warn('update check skipped:', e.message);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Title normalisation
   // ---------------------------------------------------------------------------
 
@@ -1107,7 +1160,7 @@
 
   const state = {
     record: null, index: null, syncing: false, error: null,
-    testing: false, test: null,
+    testing: false, test: null, latestVersion: null,
     stats: { seen: 0, owned: 0 },
   };
 
@@ -1299,7 +1352,24 @@
                                  'Steam library';
 
     els.panel.textContent = '';
+    if (updateAvailable()) els.panel.appendChild(updateNotice());
     els.panel.appendChild(rec ? connectedView(rec) : connectView());
+  }
+
+  /**
+   * Clicking a .user.js link makes the userscript manager offer to install it,
+   * so this link is the update button -- no separate mechanism needed.
+   */
+  function updateNotice() {
+    return h('a', {
+      class: 'hbso-update',
+      href: URL_SCRIPT,
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      title: `You have ${VERSION}`,
+    },
+      h('span', { class: 'hbso-update__dot' }),
+      h('span', { text: `Version ${state.latestVersion} available \u2014 update` }));
   }
 
   function connectView() {
@@ -1767,6 +1837,19 @@
 .hbso-panel[hidden]{display:none}
 .hbso-panel__body{padding:16px}
 
+.hbso-update{
+  display:flex;align-items:center;gap:7px;
+  padding:9px 16px;text-decoration:none;
+  background:rgba(102,192,244,.12);
+  border-bottom:1px solid rgba(102,192,244,.25);
+  color:#66c0f4;font:600 11px/1.3 inherit;
+}
+.hbso-update:hover{background:rgba(102,192,244,.2)}
+.hbso-update__dot{
+  width:6px;height:6px;border-radius:50%;flex:0 0 auto;
+  background:#66c0f4;box-shadow:0 0 0 3px rgba(102,192,244,.25);
+}
+
 .hbso-title{margin:0 0 7px;font-size:14px;font-weight:700;color:#fff}
 .hbso-copy{margin:0 0 13px;font-size:11.5px;line-height:1.55;color:#8fa3b5}
 .hbso-status{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:#fff}
@@ -1841,6 +1924,8 @@
     mountUI();
     startObserver();
     scan();
+
+    checkForUpdate();
 
     if (rec && Date.now() - rec.syncedAt > STALE_AFTER) {
       log('library is stale, refreshing in the background');
