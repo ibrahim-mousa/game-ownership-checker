@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.0.1
+// @version      2.0.2
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -18,6 +18,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -45,7 +46,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.0.1';
+  const VERSION       = '2.0.2';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -132,6 +133,55 @@
     }
     return `${kind} ${host}` + (bits.length ? ` - ${bits.join(', ')}` : '') +
            '. Run hbso.debugFetch() in the console for the full response.';
+  }
+
+  /**
+   * Like request(), but never rejects: it always resolves to a plain report.
+   * Used by the connection test, where a failure IS the result we want to see.
+   */
+  function probeRequest(url) {
+    const host = hostOf(url);
+    const xhr = getXhr();
+    if (!xhr) {
+      return Promise.resolve({ host, url, kind: 'no-api', ok: false, status: null,
+        detail: 'GM_xmlhttpRequest is unavailable' });
+    }
+    return new Promise(resolve => {
+      const report = kind => r => resolve({
+        host, url, kind,
+        ok: kind === 'onload' && r && r.status > 0,
+        status: r ? r.status : null,
+        statusText: r ? r.statusText : null,
+        readyState: r ? r.readyState : null,
+        finalUrl: r ? r.finalUrl : null,
+        error: r ? r.error : null,
+        body: (r && r.responseText) ? r.responseText.slice(0, 400) : null,
+        raw: r,
+      });
+      xhr({
+        method: 'GET', url, timeout: REQ_TIMEOUT,
+        onload: report('onload'), onerror: report('onerror'),
+        ontimeout: report('ontimeout'), onabort: report('onabort'),
+      });
+    });
+  }
+
+  /** Turns two probe reports into a plain-English verdict. */
+  function interpretProbes(community, store) {
+    const blocked = r => !r.ok && !r.status;
+    if (community.ok && store.ok) {
+      return { level: 'ok', text: 'Both Steam hosts are reachable. The failure is in parsing, not the network — please send this output.' };
+    }
+    if (blocked(community) && blocked(store)) {
+      return { level: 'bad', text: 'Both hosts blocked before leaving the browser. This is the userscript manager denying cross-origin access, not Steam.' };
+    }
+    if (blocked(community)) {
+      return { level: 'bad', text: 'Only steamcommunity.com is blocked — a stored per-domain denial, or an extension blocking that host.' };
+    }
+    if (blocked(store)) {
+      return { level: 'warn', text: 'Only store.steampowered.com is blocked. Non-fatal: names still sync.' };
+    }
+    return { level: 'warn', text: 'Reached Steam but got an unexpected response. Check the status codes above.' };
   }
 
   function request(url) {
@@ -506,7 +556,11 @@
   // Scanning
   // ---------------------------------------------------------------------------
 
-  const state = { record: null, index: null, syncing: false, error: null, stats: { seen: 0, owned: 0 } };
+  const state = {
+    record: null, index: null, syncing: false, error: null,
+    testing: false, test: null,
+    stats: { seen: 0, owned: 0 },
+  };
 
   function scan() {
     if (!state.index) return;
@@ -701,6 +755,7 @@
     }));
     body.appendChild(h('p', { class: 'hbso-fineprint', text:
       'Your library never leaves this browser.' }));
+    body.appendChild(diagnosticsSection());
     return body;
   }
 
@@ -740,7 +795,37 @@
     body.appendChild(h('div', { class: 'hbso-actions' }, refreshBtn, disconnect));
     body.appendChild(h('p', { class: 'hbso-fineprint', text:
       'To use a different account, switch accounts on Steam, then refresh.' }));
+    body.appendChild(diagnosticsSection());
     return body;
+  }
+
+  /** "Run connection test" button plus its results. Shown in both panel states. */
+  function diagnosticsSection() {
+    const wrap = h('div', { class: 'hbso-diag' });
+
+    const btn = h('button', {
+      class: 'hbso-linkbtn', type: 'button',
+      text: state.testing ? 'Testing…' : 'Run connection test',
+      onclick: runConnectionTest,
+    });
+    if (state.testing) btn.disabled = true;
+    wrap.appendChild(btn);
+
+    if (!state.test) return wrap;
+
+    const { community, store, verdict } = state.test;
+    const rows = h('div', { class: 'hbso-diag__rows' });
+    for (const r of [community, store]) {
+      const status = r.ok ? `ok (${r.status})`
+                   : r.status ? `${r.kind} (${r.status})`
+                              : `blocked (${r.kind}, status 0)`;
+      rows.appendChild(h('div', { class: 'hbso-diag__row' },
+        h('span', { class: 'hbso-diag__host', text: r.host }),
+        h('span', { class: 'hbso-diag__state' + (r.ok ? ' is-ok' : ' is-bad'), text: status })));
+    }
+    wrap.appendChild(rows);
+    wrap.appendChild(h('p', { class: 'hbso-diag__verdict hbso-diag__verdict--' + verdict.level, text: verdict.text }));
+    return wrap;
   }
 
   // ---------------------------------------------------------------------------
@@ -775,6 +860,26 @@
     }
   }
 
+  async function runConnectionTest() {
+    if (state.testing) return;
+    state.testing = true;
+    state.test = null;
+    renderPanel();
+
+    const community = await probeRequest(URL_GAMES_XML);
+    const store = await probeRequest(URL_USERDATA);
+    const verdict = interpretProbes(community, store);
+
+    state.test = { community, store, verdict };
+    state.testing = false;
+    renderPanel();
+
+    console.log(LOG, 'connection test:', verdict.text);
+    console.log(LOG, 'steamcommunity.com ->', community);
+    console.log(LOG, 'store.steampowered.com ->', store);
+    return state.test;
+  }
+
   async function disconnectLibrary() {
     await storageDel(STORE_KEY);
     state.record = null;
@@ -802,56 +907,15 @@
     reset: disconnectLibrary,
     normalize,
     match: (title, appid) => state.index ? matchProduct(state.index, title, appid) : null,
-    /**
-     * Raw request probe. Logs everything the manager gives back, including the
-     * failure object that a normal sync hides.
-     *
-     *   hbso.debugFetch()                                  -> the Steam games feed
-     *   hbso.debugFetch('https://store.steampowered.com/dynamicstore/userdata/')
-     */
-    debugFetch(url = URL_GAMES_XML) {
-      const xhr = getXhr();
-      if (!xhr) {
-        console.error(LOG, 'GM_xmlhttpRequest is not available at all - the @grant lines did not take effect.');
-        return Promise.resolve(null);
-      }
-      console.log(LOG, 'GET', url);
-      return new Promise(resolve => {
-        const report = kind => r => {
-          console.log(LOG, kind, {
-            status: r && r.status,
-            statusText: r && r.statusText,
-            readyState: r && r.readyState,
-            finalUrl: r && r.finalUrl,
-            error: r && r.error,
-            responseHeaders: r && r.responseHeaders,
-            bodyStart: r && r.responseText ? r.responseText.slice(0, 400) : null,
-          });
-          console.log(LOG, 'raw response object:', r);
-          resolve(r);
-        };
-        xhr({
-          method: 'GET', url, timeout: REQ_TIMEOUT,
-          onload: report('onload'), onerror: report('onerror'),
-          ontimeout: report('ontimeout'), onabort: report('onabort'),
-        });
-      });
+    /** Raw request probe; logs everything the manager returns. */
+    async debugFetch(url = URL_GAMES_XML) {
+      const r = await probeRequest(url);
+      console.log(LOG, r.kind, r);
+      return r;
     },
 
-    /** Tries both Steam hosts so you can tell a per-domain block from a manager-wide one. */
-    async debugAll() {
-      console.log(LOG, '--- steamcommunity.com ---');
-      const a = await api.debugFetch(URL_GAMES_XML);
-      console.log(LOG, '--- store.steampowered.com ---');
-      const b = await api.debugFetch(URL_USERDATA);
-      const ok = r => r && r.status > 0;
-      console.log(LOG, 'verdict:',
-        ok(a) && ok(b) ? 'both hosts reachable - the failure is elsewhere' :
-        !ok(a) && !ok(b) ? 'BOTH blocked - userscript manager permissions, not Steam' :
-        ok(b) ? 'only steamcommunity.com is blocked - check @connect / an extension blocking it' :
-                'only store.steampowered.com is blocked');
-      return { games: a, userdata: b };
-    },
+    /** Tests both Steam hosts and prints a verdict. */
+    debugAll: () => runConnectionTest(),
 
     diagnose() {
       const rows = [];
@@ -964,6 +1028,22 @@
   font-size:11px;line-height:1.5;color:#e6b0a6;
 }
 .hbso-alert strong{color:#f0c4bb;font-weight:700}
+
+.hbso-diag{margin-top:12px;padding-top:11px;border-top:1px solid rgba(199,213,224,.12)}
+.hbso-linkbtn{
+  padding:0;background:none;border:0;cursor:pointer;
+  color:#66c0f4;font:600 11px/1 inherit;text-decoration:underline;
+}
+.hbso-linkbtn:disabled{opacity:.6;cursor:default;text-decoration:none}
+.hbso-diag__rows{margin-top:9px;display:flex;flex-direction:column;gap:4px}
+.hbso-diag__row{display:flex;justify-content:space-between;gap:8px;font-size:10.5px}
+.hbso-diag__host{color:#8fa3b5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.hbso-diag__state{font-weight:700}
+.hbso-diag__state.is-ok{color:#5ba32b}
+.hbso-diag__state.is-bad{color:#d65c4a}
+.hbso-diag__verdict{margin:9px 0 0;font-size:10.5px;line-height:1.5;color:#8fa3b5}
+.hbso-diag__verdict--bad{color:#e6b0a6}
+.hbso-diag__verdict--ok{color:#9ec97f}
 `;
 
   // ---------------------------------------------------------------------------
@@ -988,9 +1068,23 @@
       refresh({ silent: true });
     }
 
-    try {
-      Object.defineProperty(window, 'hbso', { value: api, configurable: true });
-    } catch { window.hbso = api; }
+    // Violentmonkey/Tampermonkey sandbox the script when any @grant is used, so
+    // plain `window` is a proxy the page console cannot see. unsafeWindow is the
+    // real page window. Firefox can refuse the assignment across the Xray
+    // boundary, which is why the connection test also lives in the panel UI.
+    const pageWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+    let exposed = false;
+    for (const target of [pageWindow, window]) {
+      try {
+        Object.defineProperty(target, 'hbso', { value: api, configurable: true, writable: true });
+        exposed = true;
+      } catch {
+        try { target.hbso = api; exposed = true; } catch { /* Xray boundary */ }
+      }
+    }
+    if (!exposed) {
+      warn('could not expose `hbso` to the page console; use the panel\u2019s "Run connection test" button instead.');
+    }
 
     log(`v${VERSION} ready.`, rec ? `${rec.games.length} games loaded.` : 'Not connected yet.');
   }
