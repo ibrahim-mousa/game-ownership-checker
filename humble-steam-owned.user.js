@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.2.0
+// @version      2.2.1
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -46,7 +46,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.2.0';
+  const VERSION       = '2.2.1';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -204,31 +204,38 @@
         'something is filtering by URL. Check content blockers.' };
     }
 
-    // The decisive check. Reaching Steam is worthless if the request arrives
-    // signed out: Steam answers 200 with a login page or an empty payload, so
-    // status codes alone look perfectly healthy.
-    const signedOut = (live(p.root) && !p.root.steamId)
-      || (p.store && p.store.ownedCount === 0);
-    if (signedOut) {
-      return { level: 'bad', text:
-        'Steam is reachable but the requests are arriving SIGNED OUT \u2014 your ' +
-        'cookies are not being attached. Everything returning 200 is a login page ' +
-        'or an empty payload. Check that you are signed in at steamcommunity.com ' +
-        'in this browser, and that the userscript manager is allowed to send ' +
-        'cookies (Violentmonkey on Firefox may need Enhanced Tracking Protection ' +
-        'turned off for Steam).' };
-    }
+    // Authoritative: g_steamID on a community page. If it is present, cookies
+    // are reaching Steam and nothing below should claim otherwise.
+    const communitySignedIn = live(p.root) && Boolean(p.root.steamId);
 
+    if (live(p.root) && !communitySignedIn) {
+      return { level: 'bad', text:
+        'Steam is reachable but the requests are arriving SIGNED OUT \u2014 cookies are ' +
+        'not being attached. Everything returning 200 is a login page or an empty ' +
+        'payload. Check you are signed in at steamcommunity.com, and that the ' +
+        'userscript manager may send cookies (on Firefox, Enhanced Tracking ' +
+        'Protection can partition them away).' };
+    }
+    if (live(p.feed) && /login page/.test(p.feed.note || '')) {
+      return { level: 'bad', text:
+        'The games page redirected to sign-in even though the session looks valid. ' +
+        'Please open an issue with this output.' };
+    }
     if (live(p.feed) && p.feed.gamesFound === null) {
       return { level: 'warn', text:
-        'Signed in and the games page loaded, but its markup was not recognised. ' +
-        'This is a parser fix \u2014 please send the page structure.' };
+        'Signed in, and your games page loaded \u2014 but its markup is not one this ' +
+        'parser knows. This is a one-line fix: send the "page structure" details ' +
+        'below. Nothing is wrong with your setup.' };
     }
     if (live(p.feed) && p.feed.gamesFound > 0) {
+      const storeNote = (p.store && p.store.ownedCount === 0)
+        ? ' You are not signed in at store.steampowered.com, so the appid supplement ' +
+          'is unavailable \u2014 harmless, names still sync.'
+        : '';
       return { level: 'ok', text:
-        `Signed in and ${p.feed.gamesFound} games parsed. The retired xml feed ` +
-        'failing is expected and harmless.' };
+        `Signed in and ${p.feed.gamesFound} games parsed.` + storeNote };
     }
+
     if (live(p.root) && dead(p.feed)) {
       return { level: 'bad', text:
         'The games page specifically is failing while the rest of steamcommunity.com ' +
@@ -322,6 +329,29 @@
     }
 
     return null;
+  }
+
+  /**
+   * When the games page does not parse, describe what it *does* contain so the
+   * parser can be fixed without asking anyone to go spelunking in devtools.
+   */
+  function describeMarkup(html) {
+    const markers = [
+      'gameslist_config', 'data-profile-gameslist', 'rgGames', 'g_rgProfileData',
+      'GetOwnedGames', 'games_list_tab', 'gameListRow', 'profile_small_header',
+      'responsive_page_template_content', 'application/json',
+    ];
+    const uniq = arr => Array.from(new Set(arr));
+    const grab = (re, group) => uniq(Array.from(html.matchAll(re)).map(m => m[group]));
+
+    return {
+      length: html.length,
+      markers: markers.filter(m => html.includes(m)),
+      gameIds: grab(/id="([^"]*game[^"]*)"/gi, 1).slice(0, 10),
+      bigDataAttrs: grab(/\s(data-[a-z-]+)="[^"]{200,}"/gi, 1).slice(0, 10),
+      jsonScriptIds: grab(/<script[^>]+type="application\/json"[^>]*id="([^"]+)"/gi, 1).slice(0, 10),
+      bigVars: grab(/var\s+([A-Za-z_$][\w$]*)\s*=\s*[[{][^;]{200,}/g, 1).slice(0, 10),
+    };
   }
 
   /**
@@ -991,6 +1021,23 @@
     }
     wrap.appendChild(rows);
     wrap.appendChild(h('p', { class: 'hbso-diag__verdict hbso-diag__verdict--' + verdict.level, text: verdict.text }));
+
+    // When the games page did not parse, show what it actually contains so the
+    // details can be copied straight into an issue.
+    const hints = state.test.byKey && state.test.byKey.feed && state.test.byKey.feed.hints;
+    if (hints) {
+      const lines = [
+        `length: ${hints.length}`,
+        `markers: ${hints.markers.join(', ') || 'none'}`,
+        `game ids: ${hints.gameIds.join(', ') || 'none'}`,
+        `big data attrs: ${hints.bigDataAttrs.join(', ') || 'none'}`,
+        `json script ids: ${hints.jsonScriptIds.join(', ') || 'none'}`,
+        `big vars: ${hints.bigVars.join(', ') || 'none'}`,
+      ];
+      wrap.appendChild(h('p', { class: 'hbso-diag__label', text: 'Page structure' }));
+      wrap.appendChild(h('pre', { class: 'hbso-diag__pre', text: lines.join('\n') }));
+    }
+
     return wrap;
   }
 
@@ -1063,6 +1110,7 @@
           const rows = parseProfileGames(bodyText);
           report.note = rows ? `${rows.length} games parsed` : 'markup not recognised';
           report.gamesFound = rows ? rows.length : null;
+          if (!rows) report.hints = describeMarkup(bodyText);
         }
       }
 
@@ -1252,6 +1300,14 @@
 .hbso-diag__verdict{margin:9px 0 0;font-size:10.5px;line-height:1.5;color:#8fa3b5}
 .hbso-diag__verdict--bad{color:#e6b0a6}
 .hbso-diag__verdict--ok{color:#9ec97f}
+.hbso-diag__label{margin:10px 0 4px;font-size:10px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:#8fa3b5}
+.hbso-diag__pre{
+  margin:0;padding:8px;max-height:150px;overflow:auto;
+  background:rgba(0,0,0,.28);border-radius:3px;
+  font:400 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:#a8bccd;white-space:pre-wrap;word-break:break-word;user-select:text;
+}
 `;
 
   // ---------------------------------------------------------------------------
