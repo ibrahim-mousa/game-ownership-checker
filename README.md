@@ -157,6 +157,10 @@ normalisation or add an alias, add a case there.
 Open the panel and click **Run connection test**. It probes one thing at a time
 and explains the result in plain English.
 
+When something needs reporting, the panel shows a **Report this on GitHub**
+link that opens a pre-filled issue — script version, browser, every probe
+result and the page structure. No copying tables by hand.
+
 A `200` from Steam proves nothing on its own — signed out, Steam answers `200`
 with a login page or an empty payload — so the test reads response *bodies*:
 the `steamcommunity.com` row reports `signed in` or `SIGNED OUT`, and the games
@@ -166,7 +170,7 @@ row reports how many games were parsed.
 | --- | --- |
 | Every row `blocked (status 0)` | The userscript manager is denying cross-origin access, or the extension's site access is limited |
 | `SIGNED OUT` | Cookies are not reaching Steam — check you are signed in at steamcommunity.com |
-| `markup not recognised` | Steam changed its page. The panel prints a **Page structure** block — please open an issue with it |
+| `markup not recognised` | Steam changed its page. The panel shows a **Report this on GitHub** link with the diagnostics already filled in |
 | `xml feed (retired)` failing | **Expected.** Shown for reference only |
 
 ### Console helpers

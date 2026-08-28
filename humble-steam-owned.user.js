@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.0.0
+// @version      3.1.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.0.0';
+  const VERSION       = '3.1.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -62,6 +62,7 @@
   const URL_USERDATA  = 'https://store.steampowered.com/dynamicstore/userdata/';
   const URL_OWNED_API = 'https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/';
   const URL_LOGIN     = 'https://store.steampowered.com/login/';
+  const URL_ISSUES    = 'https://github.com/ibrahim-mousa/game-ownership-checker/issues/new';
 
   const log  = (...a) => console.log(LOG, ...a);
   const warn = (...a) => console.warn(LOG, ...a);
@@ -235,15 +236,14 @@
         'Protection can partition them away).' };
     }
     if (live(p.feed) && /login page/.test(p.feed.note || '')) {
-      return { level: 'bad', text:
-        'The games page redirected to sign-in even though the session looks valid. ' +
-        'Please open an issue with this output.' };
+      return { level: 'bad', report: true, text:
+        'The games page redirected to sign-in even though the session looks valid.' };
     }
     if (live(p.feed) && p.feed.gamesFound === null) {
-      return { level: 'warn', text:
+      return { level: 'warn', report: true, text:
         'Signed in, and your games page loaded \u2014 but its markup is not one this ' +
-        'parser knows. This is a one-line fix: send the "page structure" details ' +
-        'below. Nothing is wrong with your setup.' };
+        'parser knows. This is a one-line fix, and the report below is filled in ' +
+        'for you. Nothing is wrong with your setup.' };
     }
     if (p.api && p.api.ok && p.api.gamesFound > 0) {
       return { level: 'ok', text:
@@ -258,9 +258,9 @@
         '@connect entry.' };
     }
     if (p.feed && p.feed.gamesFound && !p.feed.token) {
-      return { level: 'warn', text:
+      return { level: 'warn', report: true, text:
         `No web API token on the page, so the library falls back to page parsing ` +
-        `(${p.feed.gamesFound} games). That can be incomplete \u2014 please open an issue.` };
+        `(${p.feed.gamesFound} games). That can be incomplete.` };
     }
     if (live(p.feed) && p.feed.gamesFound > 0) {
       const storeNote = (p.store && p.store.ownedCount === 0)
@@ -272,9 +272,9 @@
     }
 
     if (live(p.root) && dead(p.feed)) {
-      return { level: 'bad', text:
+      return { level: 'bad', report: true, text:
         'The games page specifically is failing while the rest of steamcommunity.com ' +
-        'works. Check content blockers, then please open an issue.' };
+        'works. Check content blockers first.' };
     }
     return { level: 'warn', text:
       'Mixed results \u2014 check the rows above. A non-zero status means the network is fine.' };
@@ -660,7 +660,7 @@
     if (!rows) {
       throw new Error(
         'Signed in, but the games list could not be read. Steam may have changed ' +
-        'its markup \u2014 please open an issue with the page structure details.');
+        'its markup \u2014 run the connection test below to file a report.');
     }
 
     log(`library via page parsing: ${rows.length} games`);
@@ -1278,9 +1278,7 @@
       'your own Steam session - no API key, no profile URL, and private libraries work too.' }));
 
     if (state.error) {
-      body.appendChild(h('div', { class: 'hbso-alert' },
-        h('strong', { text: state.error.title }),
-        h('span', { text: state.error.detail })));
+      body.appendChild(errorAlert());
     }
 
     const connect = h('button', {
@@ -1317,9 +1315,7 @@
       `${formatCount(state.stats.owned)} of ${formatCount(state.stats.seen)} items on this page` }));
 
     if (state.error) {
-      body.appendChild(h('div', { class: 'hbso-alert' },
-        h('strong', { text: state.error.title }),
-        h('span', { text: state.error.detail })));
+      body.appendChild(errorAlert());
     }
 
     const refreshBtn = h('button', {
@@ -1339,6 +1335,65 @@
       'To use a different account, switch accounts on Steam, then refresh.' }));
     body.appendChild(diagnosticsSection());
     return body;
+  }
+
+  function errorAlert() {
+    const alert = h('div', { class: 'hbso-alert' },
+      h('strong', { text: state.error.title }),
+      h('span', { text: state.error.detail }));
+
+    if (state.error.report) {
+      alert.appendChild(h('br'));
+      alert.appendChild(issueLink('Sync failed: ' + String(state.error.detail).slice(0, 80)));
+    }
+    return alert;
+  }
+
+  /**
+   * A GitHub "new issue" URL with the diagnostics already filled in, so a bug
+   * report does not depend on someone hand-copying a table out of a panel.
+   */
+  function issueUrl(title, body) {
+    const params = new URLSearchParams({ title });
+    if (body) params.set('body', body.slice(0, 4000)); // keep the URL sane
+    return URL_ISSUES + '?' + params.toString();
+  }
+
+  /** Everything the connection test learned, as markdown. */
+  function reportBody() {
+    const lines = [`**Script version:** ${VERSION}`, `**User agent:** ${navigator.userAgent}`, ''];
+    const test = state.test;
+
+    if (test) {
+      lines.push('**Connection test**', '', '```');
+      for (const r of test.probes) {
+        const status = r.ok ? `ok (${r.status})` : `${r.kind} (status ${r.status})`;
+        lines.push(`${(r.label || r.host).trim()}: ${status}${r.note ? ' - ' + r.note : ''}`);
+      }
+      lines.push('```', '', `**Verdict:** ${test.verdict.text}`, '');
+
+      const hints = test.byKey.feed && test.byKey.feed.hints;
+      if (hints) {
+        lines.push('**Page structure**', '', '```');
+        for (const [key, value] of Object.entries(hints)) {
+          lines.push(`${key}: ${Array.isArray(value) ? value.join(', ') : value}`);
+        }
+        lines.push('```', '');
+      }
+    }
+
+    lines.push('**What I expected / what happened**', '', '<!-- anything else worth knowing -->');
+    return lines.join('\n');
+  }
+
+  function issueLink(title) {
+    return h('a', {
+      class: 'hbso-link',
+      href: issueUrl(title, reportBody()),
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      text: 'Report this on GitHub \u2192',
+    });
   }
 
   /** "Run connection test" button plus its results. Shown in both panel states. */
@@ -1371,6 +1426,9 @@
     }
     wrap.appendChild(rows);
     wrap.appendChild(h('p', { class: 'hbso-diag__verdict hbso-diag__verdict--' + verdict.level, text: verdict.text }));
+    if (verdict.report) {
+      wrap.appendChild(issueLink('Connection test: ' + verdict.text.slice(0, 80)));
+    }
 
     // When the games page did not parse, show what it actually contains so the
     // details can be copied straight into an issue.
@@ -1419,7 +1477,7 @@
           detail: 'Open Steam in another tab, sign in, then try again.',
         };
       } else {
-        state.error = { title: 'Could not reach Steam. ', detail: err.message };
+        state.error = { title: 'Could not reach Steam. ', detail: err.message, report: true };
       }
       if (!silent) warn('sync failed:', err);
     } finally {
@@ -1705,6 +1763,7 @@
   font-size:11px;line-height:1.5;color:#e6b0a6;
 }
 .hbso-alert strong{color:#f0c4bb;font-weight:700}
+.hbso-alert .hbso-link{margin-top:6px;color:#f0c4bb;text-decoration:underline}
 
 .hbso-diag{margin-top:12px;padding-top:11px;border-top:1px solid rgba(199,213,224,.12)}
 .hbso-linkbtn{

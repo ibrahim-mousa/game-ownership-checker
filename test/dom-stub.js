@@ -87,6 +87,7 @@ function installGlobals({ xhr } = {}) {
   global.location = { pathname: '/store' };
   global.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
   global.GM_addStyle = () => {};
+  global.navigator = global.navigator || { userAgent: 'test-agent' };
   global.GM_xmlhttpRequest = xhr
     || (opts => setTimeout(() => opts.onerror({ status: 0, readyState: 4 }), 0));
 

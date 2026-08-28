@@ -20,7 +20,7 @@ function check(name, ok, detail) {
 
 const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
                  'runConnectionTest', 'interpretProbes', 'buildIndex', 'isProductCard',
-                 'badgeHost', 'badgeCard'];
+                 'badgeHost', 'badgeCard', 'issueUrl', 'reportBody'];
 
 // --- Clicking a panel button must not close the panel ------------------------
 //
@@ -142,6 +142,41 @@ const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
   M.badgeCard(card, adapter, { tier: 'exact', how: 'test', name: 'X' });
   check('badge is appended to a non-void parent',
     card.children.length === 1 && img.children.length === 0);
+}
+
+// --- Bug reports are filled in for the user ----------------------------------
+//
+// A report that depends on someone hand-copying a table out of a panel is a
+// report that never arrives. The link carries the diagnostics.
+{
+  installGlobals();
+  const M = loadUserscript(EXPORTS);
+
+  M.state.test = {
+    probes: [
+      { key: 'root', label: 'steamcommunity.com', ok: true, status: 200, note: 'signed in' },
+      { key: 'feed', label: '  games page', ok: true, status: 200, note: 'markup not recognised',
+        hints: { length: 15835025, title: 'Steam Community :: Games', markers: [], bigVars: ['g_rgProfileData'] } },
+    ],
+    byKey: {},
+    verdict: { level: 'warn', report: true, text: 'markup is not one this parser knows' },
+  };
+  M.state.test.byKey.feed = M.state.test.probes[1];
+
+  const url = M.issueUrl('Connection test failed', M.reportBody());
+  check('issue link points at this repository',
+    url.startsWith('https://github.com/ibrahim-mousa/game-ownership-checker/issues/new?'));
+
+  const body = new URL(url).searchParams.get('body');
+  check('report carries the script version', body.includes('3.1.0') || /Script version/.test(body));
+  check('report carries the probe results', body.includes('steamcommunity.com: ok (200)'));
+  check('report carries the page structure', body.includes('15835025'));
+
+  // GitHub URLs are not unbounded, and the page-structure block can be huge.
+  M.state.test.probes[1].hints.title = 'x'.repeat(20000);
+  const capped = new URL(M.issueUrl('t', M.reportBody())).searchParams.get('body');
+  check('an oversized report is capped rather than producing a broken URL',
+    capped.length === 4000, `body was ${capped.length}`);
 }
 
 // --- Connection-test verdicts ------------------------------------------------
