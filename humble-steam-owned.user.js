@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.4.0
+// @version      2.4.1
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.4.0';
+  const VERSION       = '2.4.1';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -228,6 +228,23 @@
         'Signed in, and your games page loaded \u2014 but its markup is not one this ' +
         'parser knows. This is a one-line fix: send the "page structure" details ' +
         'below. Nothing is wrong with your setup.' };
+    }
+    if (p.api && p.api.ok && p.api.gamesFound > 0) {
+      return { level: 'ok', text:
+        `Signed in. The web API returned ${p.api.gamesFound} games \u2014 that is the ` +
+        'complete library and the number the badges use. (Page parsing finds fewer; ' +
+        'the page ships several small lists, which is expected.)' };
+    }
+    if (p.feed && p.feed.token && p.api && !p.api.ok) {
+      return { level: 'bad', text:
+        'A token was found but the web API call failed. Check that ' +
+        'api.steampowered.com is allowed \u2014 a clean reinstall registers the new ' +
+        '@connect entry.' };
+    }
+    if (p.feed && p.feed.gamesFound && !p.feed.token) {
+      return { level: 'warn', text:
+        `No web API token on the page, so the library falls back to page parsing ` +
+        `(${p.feed.gamesFound} games). That can be incomplete \u2014 please open an issue.` };
     }
     if (live(p.feed) && p.feed.gamesFound > 0) {
       const storeNote = (p.store && p.store.ownedCount === 0)
@@ -431,25 +448,39 @@
     return null;
   }
 
-  /** Depth-limited hunt for an array of objects that look like games. */
-  function findGameArray(node, depth) {
+  /**
+   * Collects every array that looks like a list of games.
+   *
+   * A profile page carries several: "recently played" is a handful of entries
+   * and sits earlier in the tree than the full library, so taking the first
+   * match yields five games instead of three thousand. Collect them all and let
+   * the caller pick.
+   */
+  function collectGameArrays(node, depth, out) {
     depth = depth || 0;
-    if (depth > 8 || !node || typeof node !== 'object') return null;
+    out = out || [];
+    if (depth > 8 || !node || typeof node !== 'object') return out;
 
     if (Array.isArray(node)) {
       const first = node[0];
-      if (first && typeof first === 'object' && 'appid' in first && 'name' in first) return node;
-      for (const item of node) {
-        const hit = findGameArray(item, depth + 1);
-        if (hit) return hit;
+      if (first && typeof first === 'object' && 'appid' in first && 'name' in first) {
+        out.push(node);
+        return out; // no need to descend into the games themselves
       }
-      return null;
+      for (const item of node) collectGameArrays(item, depth + 1, out);
+      return out;
     }
-    for (const key of Object.keys(node)) {
-      const hit = findGameArray(node[key], depth + 1);
-      if (hit) return hit;
+    for (const key of Object.keys(node)) collectGameArrays(node[key], depth + 1, out);
+    return out;
+  }
+
+  /** The biggest games array found anywhere in `node`, or null. */
+  function findGameArray(node) {
+    let best = null;
+    for (const candidate of collectGameArrays(node)) {
+      if (!best || candidate.length > best.length) best = candidate;
     }
-    return null;
+    return best;
   }
 
   /**
@@ -471,15 +502,21 @@
     try { outer = JSON.parse(literal); }
     catch (e) { warn('could not parse SSR.loaderData:', e.message); return null; }
 
+    // Scan every entry, keeping the largest candidate rather than the first.
+    let best = null;
+    const sizes = [];
     for (const entry of Array.isArray(outer) ? outer : []) {
       let inner = entry;
       if (typeof entry === 'string') {
         try { inner = JSON.parse(entry); } catch { continue; }
       }
-      const games = findGameArray(inner);
-      if (games) return games;
+      for (const candidate of collectGameArrays(inner)) {
+        sizes.push(candidate.length);
+        if (!best || candidate.length > best.length) best = candidate;
+      }
     }
-    return null;
+    if (sizes.length > 1) log('games arrays found in SSR state:', sizes.join(', '), '-> using largest');
+    return best;
   }
 
   /**
@@ -1281,6 +1318,7 @@
 
     const probes = [];
     const byKey = {};
+    let apiRow = null;
     for (const spec of PROBES) {
       const report = Object.assign(await probeRequest(spec.url),
         { key: spec.key, label: spec.label, informational: spec.informational || false });
@@ -1299,9 +1337,26 @@
           report.note = 'login page, not your library';
         } else {
           const rows = parseProfileGames(bodyText);
-          report.note = rows ? `${rows.length} games parsed` : 'markup not recognised';
           report.gamesFound = rows ? rows.length : null;
+          report.token = parseWebApiToken(bodyText);
+          report.note = (rows ? `${rows.length} parsed from page` : 'markup not recognised')
+            + (report.token ? ', token found' : ', NO token');
           if (!rows) report.hints = describeMarkup(bodyText);
+
+          // The real path Connect uses. Reported separately so page parsing
+          // falling short (it carries several small lists) is not mistaken for
+          // the library actually being incomplete.
+          const steamId = (byKey.root && byKey.root.steamId)
+            || parseProfileIdentity(bodyText).steamId;
+          if (report.token && steamId) {
+            const viaApi = await fetchOwnedViaApi(report.token, steamId).catch(() => null);
+            apiRow = {
+              key: 'api', label: '  \u21b3 web API (used)', ok: Boolean(viaApi),
+              status: viaApi ? 200 : 0, informational: false,
+              note: viaApi ? `${viaApi.length} games` : 'call failed',
+              gamesFound: viaApi ? viaApi.length : null,
+            };
+          }
         }
       }
 
@@ -1314,6 +1369,12 @@
 
       probes.push(report);
       byKey[spec.key] = report;
+    }
+
+    if (apiRow) {
+      const at = probes.findIndex(r => r.key === 'xml');
+      probes.splice(at === -1 ? probes.length : at, 0, apiRow);
+      byKey.api = apiRow;
     }
 
     const verdict = interpretProbes(byKey);
