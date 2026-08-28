@@ -47,28 +47,6 @@ details public. The only requirement is being signed in to Steam.
 Nothing is uploaded anywhere. Your library is stored by your userscript manager
 and only ever compared against titles on the page.
 
-<details>
-<summary>Getting the library out of Steam took some doing (click for the details)</summary>
-
-The old `?xml=1` games feed is retired. It redirects to sign-in unconditionally,
-so for a signed-in user the login page bounces straight back and the request
-becomes an infinite redirect loop — browsers report *"the page isn't redirecting
-properly"*, while a userscript manager follows redirects until it gives up and
-reports a failure with no HTTP status, which looks exactly like a blocked
-request.
-
-The modern games page is a React app that ships ~16MB of state as
-`window.SSR.loaderData`, an array whose entries are JSON *strings* — so the
-contents are double-encoded (`appid\":` rather than `appid":`) and the list
-lazy-renders as you scroll, meaning a naive scrape gets a partial library.
-
-That page also carries a `strWebAPIToken`, which is the way out: the script
-lifts the token and calls `GetOwnedGames` for a few KB of clean JSON, complete
-regardless of scroll position. Parsing the embedded SSR state is the fallback,
-and a container-agnostic scan for `appid`/`name` pairs is the last resort.
-
-</details>
-
 ---
 
 ## How matching works
