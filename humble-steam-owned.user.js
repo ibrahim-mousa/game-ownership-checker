@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.4.1
+// @version      2.5.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.4.1';
+  const VERSION       = '2.5.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -714,12 +714,29 @@
     xiii: 13, xiv: 14, xv: 15, xvi: 16, xvii: 17, xviii: 18, xix: 19, xx: 20,
   };
 
+  // Words that qualify an edition rather than name a game.
+  const EDITION_ADJ =
+    '(?:goty|game of the year|digital|deluxe|definitive|enhanced|complete|ultimate|' +
+    'standard|premium|collectors?|anniversary|extended|special|gold|platinum|' +
+    'legendary|day one|super|royal|ultra|essentials|extras|founders|supporter|' +
+    'limited|directors cut|remastered|remaster|redux)';
+
+  /**
+   * A trailing edition suffix, e.g. "... Super Deluxe Edition".
+   *
+   * Qualifiers stack, so the adjective is allowed to repeat -- matching only one
+   * leaves "borderlands 4 super", which matches nothing.
+   *
+   * A bare adjective is only stripped when it is unambiguous ("GOTY",
+   * "Remastered"). Requiring the word "Edition" otherwise is what stops
+   * "Persona 5 Royal" collapsing to "Persona 5" and "Portal Reloaded" to
+   * "Portal" -- those are game names, not editions.
+   */
   const EDITION_TAIL = new RegExp(
     '\\s+(?:the\\s+)?(?:' +
-    'goty|game of the year|digital deluxe|deluxe|definitive|enhanced|complete|ultimate|' +
-    'standard|premium|collectors|collector|anniversary|remastered|remaster|redux|' +
-    'directors cut|extended|special|gold|platinum|legendary|day one|classic' +
-    ')(?:\\s+(?:edition|cut|version|pack|bundle))?$'
+      '(?:' + EDITION_ADJ + '\\s+)*' + EDITION_ADJ + '\\s+(?:edition|cut|version|pack|bundle)' +
+      '|goty|game of the year|remastered|remaster|redux' +
+    ')$'
   );
 
   // Subtitles that mean "separate product", not "same game with a tagline".
@@ -891,6 +908,32 @@
     },
   ];
 
+  /**
+   * Genre, publisher and promo tiles reuse the same card markup as games:
+   * "Puzzle", "Horror", "Ubisoft", "Deals Under $5" all arrive as titled cards.
+   * Badging those would be a false positive against any Steam game with a
+   * matching name, so they have to be excluded before matching.
+   *
+   * The discriminator is the link: products point at /store/<slug>, while tiles
+   * point at a filtered search. Cards with no link at all are allowed through --
+   * the matcher is the safety net, and rejecting them would risk dropping real
+   * products on layouts we have not seen.
+   */
+  const NON_PRODUCT_PATH =
+    /\/(?:search|browse|genres?|publishers?|platform|promo|subscription|membership|charity|creators?|hub|bundles?)\b/i;
+
+  function cardHref(card) {
+    const link = card.querySelector && card.querySelector('a[href]');
+    return link ? (link.getAttribute('href') || '') : '';
+  }
+
+  function isProductCard(card) {
+    const href = cardHref(card);
+    if (!href) return true;
+    if (href.includes('?')) return false; // filtered search, never a product page
+    return !NON_PRODUCT_PATH.test(href);
+  }
+
   function pick(root, selectors) {
     for (const sel of selectors) {
       const el = root.querySelector(sel);
@@ -988,6 +1031,10 @@
           if (!title) return;
 
           card.dataset.hbso = '1';
+
+          // Not a product (genre/publisher/promo tile) -- never badge it.
+          if (!isProductCard(card)) return;
+
           if (!done) seen++;
 
           const match = matchProduct(state.index, title, extractAppId(card));
@@ -1430,12 +1477,16 @@
         for (const sel of adapter.cards) {
           const nodes = document.querySelectorAll(sel);
           if (!nodes.length) { rows.push({ adapter: adapter.name, selector: sel, cards: 0, titled: 0, sample: '' }); continue; }
-          let titled = 0, sample = '';
+          let titled = 0, products = 0, sample = '';
           nodes.forEach(n => {
             const t = pick(n, adapter.titles);
-            if (t && t.textContent.trim()) { titled++; if (!sample) sample = t.textContent.trim(); }
+            if (t && t.textContent.trim()) {
+              titled++;
+              if (isProductCard(n)) products++;
+              if (!sample) sample = t.textContent.trim();
+            }
           });
-          rows.push({ adapter: adapter.name, selector: sel, cards: nodes.length, titled, sample });
+          rows.push({ adapter: adapter.name, selector: sel, cards: nodes.length, titled, products, sample });
         }
       }
       console.table(rows);
@@ -1445,20 +1496,32 @@
     },
     unmatched() {
       if (!state.index) return [];
-      const out = [];
+      const rows = [];
+      const seen = new Set();
+
       for (const adapter of ADAPTERS) {
         for (const sel of adapter.cards) {
           document.querySelectorAll(sel).forEach(card => {
-            const t = pick(card, adapter.titles);
-            const title = t && t.textContent.trim();
-            if (title && !matchProduct(state.index, title, extractAppId(card))) {
-              out.push({ title, normalized: normalize(title), base: baseKey(title) });
-            }
+            const titleEl = pick(card, adapter.titles);
+            const title = titleEl && titleEl.textContent.trim();
+            if (!title || seen.has(title)) return;
+            if (!isProductCard(card)) return; // tiles are excluded by design
+            if (matchProduct(state.index, title, extractAppId(card))) return;
+
+            seen.add(title);
+            rows.push({
+              title,
+              normalized: normalize(title),
+              deEditioned: stripEditions(normalize(title)),
+              base: baseKey(title),
+              href: cardHref(card).slice(0, 60),
+            });
           });
         }
       }
-      console.table(out);
-      return out;
+      console.table(rows);
+      console.log(LOG, rows.length, 'distinct unmatched product(s)');
+      return rows;
     },
   };
 
