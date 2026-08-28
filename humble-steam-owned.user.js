@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      2.6.3
+// @version      2.7.0
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '2.6.3';
+  const VERSION       = '2.7.0';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -892,7 +892,7 @@
       name: 'store-grid',           // store front, search results, wishlist, carousels
       cards:  ['li.entity-block-container', '.entity-block-container'],
       titles: ['span.entity-title', '.entity-title'],
-      anchor: ['.entity-image-container', '.entity-image', 'a.entity-link'],
+      anchor: ['.entity-image-container', '.entity-image'],
     },
     {
       name: 'bundle-tier',          // /games/<bundle>, /books/<bundle>, /software/<bundle>
@@ -1005,7 +1005,15 @@
   function badgeHost(card, adapter) {
     for (const sel of adapter.anchor) {
       const el = card.querySelector(sel);
-      if (el && !VOID_TAGS.test(el.tagName)) return el;
+      if (!el) continue;
+      if (VOID_TAGS.test(el.tagName)) continue;
+      // Never turn a link into the positioning context. Humble wraps card art
+      // in an <a>, and badgeCard() gives its host `position: relative` -- which
+      // makes that link the containing block. A right-anchored badge then lands
+      // against the link's box instead of the card's and is clipped away.
+      // Left-anchoring hid this, because it extended inwards.
+      if (/^a$/i.test(el.tagName)) continue;
+      return el;
     }
     return card;
   }
@@ -1569,12 +1577,11 @@
   // ---------------------------------------------------------------------------
 
   const CSS = `
-/* Known issue: Humble draws a diagonal "EARLY ACCESS" / "NEW" ribbon across the
-   top-left corner, which this overlaps. Switching the offset to right:8px makes
-   the badge vanish: the host element cannot hold a right-anchored child.
-   Unresolved. */
+/* Top-right: Humble draws its own diagonal "EARLY ACCESS" / "NEW" ribbon across
+   the top-left corner. This only works because badgeHost() refuses to position
+   the badge against a link -- see the note there before changing either. */
 .hbso-badge{
-  position:absolute; top:8px; left:8px; z-index:30;
+  position:absolute; top:8px; right:8px; z-index:30;
   display:inline-flex; align-items:center; gap:5px;
   padding:3px 7px; border-radius:3px;
   background:rgba(23,40,56,.94);
