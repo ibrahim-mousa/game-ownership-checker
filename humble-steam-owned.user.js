@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble Bundle - Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.2.0
+// @version      3.2.1
 // @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -47,7 +47,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.2.0';
+  const VERSION       = '3.2.1';
   const STORE_KEY     = 'hbso.library.v1';
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -1111,9 +1111,23 @@
     stats: { seen: 0, owned: 0 },
   };
 
+  /**
+   * Counts what is on the page right now, rather than accumulating.
+   *
+   * Humble rebuilds its cards on resize, so an accumulating total counted the
+   * same games again every time the layout changed -- the panel doubled while
+   * the badges stayed put. Reading the DOM cannot drift.
+   */
+  function refreshStats() {
+    state.stats = {
+      seen: document.querySelectorAll('[data-hbso-product="1"]').length,
+      owned: document.querySelectorAll('.hbso-badge').length,
+    };
+  }
+
   function scan() {
     if (!state.index) return;
-    let seen = 0, owned = 0;
+    let fresh = 0;
 
     for (const adapter of ADAPTERS) {
       for (const cardSel of adapter.cards) {
@@ -1133,13 +1147,13 @@
           // Not a product (genre/publisher/promo tile) -- never badge it.
           if (!isProductCard(card)) return;
 
-          if (!done) seen++;
+          card.dataset.hbsoProduct = '1';
+          if (!done) fresh++;
 
           const match = matchProduct(state.index, title, extractAppId(card));
           if (match) {
             badgeCard(card, adapter, match);
             card.dataset.hbsoOwned = '1';
-            if (!done) owned++;
           }
         });
       }
@@ -1147,12 +1161,12 @@
 
     scanProductPage();
 
-    if (seen) {
-      state.stats.seen += seen;
-      state.stats.owned += owned;
-      log(`scanned ${seen} new item(s), ${owned} owned`);
-      renderPanel();
-    }
+    const before = `${state.stats.owned}/${state.stats.seen}`;
+    refreshStats();
+    const after = `${state.stats.owned}/${state.stats.seen}`;
+
+    if (fresh) log(`scanned ${fresh} new item(s); ${after} owned on this page`);
+    if (fresh || before !== after) renderPanel();
   }
 
   /** Single-product store pages get one badge next to the title. */
@@ -1166,6 +1180,7 @@
     const title = heading.textContent.trim();
     if (!title) return;
     heading.dataset.hbso = '1';
+    heading.dataset.hbsoProduct = '1';
 
     const match = matchProduct(state.index, title, extractAppId(document.body));
     if (!match) return;
@@ -1178,6 +1193,7 @@
     document.querySelectorAll('[data-hbso]').forEach(el => {
       delete el.dataset.hbso;
       delete el.dataset.hbsoOwned;
+      delete el.dataset.hbsoProduct;
     });
     document.querySelectorAll('.hbso-badge').forEach(el => el.remove());
     document.querySelectorAll('.hbso-owned').forEach(el => el.classList.remove('hbso-owned'));
@@ -1600,6 +1616,7 @@
     document.querySelectorAll('[data-hbso]').forEach(el => {
       delete el.dataset.hbso;
       delete el.dataset.hbsoOwned;
+      delete el.dataset.hbsoProduct;
     });
     document.querySelectorAll('.hbso-owned').forEach(el => el.classList.remove('hbso-owned'));
     renderPanel();

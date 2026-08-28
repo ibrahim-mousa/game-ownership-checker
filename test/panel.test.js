@@ -20,7 +20,7 @@ function check(name, ok, detail) {
 
 const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
                  'runConnectionTest', 'interpretProbes', 'buildIndex', 'isProductCard',
-                 'badgeHost', 'badgeCard', 'issueUrl', 'reportBody'];
+                 'badgeHost', 'badgeCard', 'issueUrl', 'reportBody', 'refreshStats', 'scan'];
 
 // --- Clicking a panel button must not close the panel ------------------------
 //
@@ -177,6 +177,52 @@ const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
   const capped = new URL(M.issueUrl('t', M.reportBody())).searchParams.get('body');
   check('an oversized report is capped rather than producing a broken URL',
     capped.length === 4000, `body was ${capped.length}`);
+}
+
+// --- The owned counter must describe the page, not accumulate ----------------
+//
+// Humble rebuilds its cards on window resize, so React hands back brand-new
+// elements with none of our data- markers. An accumulating total counted the
+// same games again on every resize: the panel climbed 2 -> 4 -> 8 while the
+// page still showed exactly two badges.
+{
+  installGlobals();
+  const M = loadUserscript(EXPORTS);
+
+  // Stand in for the live DOM: however many badges/products currently exist.
+  let badges = 2;
+  let products = 6;
+  global.document.querySelectorAll = sel => {
+    if (sel === '.hbso-badge') return new Array(badges).fill(null);
+    if (sel === '[data-hbso-product="1"]') return new Array(products).fill(null);
+    return [];
+  };
+
+  M.refreshStats();
+  check('counts what is on the page', M.state.stats.owned === 2 && M.state.stats.seen === 6,
+    `${M.state.stats.owned}/${M.state.stats.seen}`);
+
+  // A resize: same page, same two badges, recounted.
+  M.refreshStats();
+  M.refreshStats();
+  M.refreshStats();
+  check('repeated scans do not inflate the count',
+    M.state.stats.owned === 2, `owned climbed to ${M.state.stats.owned}`);
+
+  // Now the page genuinely changes (pagination, infinite scroll).
+  badges = 5;
+  products = 20;
+  M.refreshStats();
+  check('a real change is reflected',
+    M.state.stats.owned === 5 && M.state.stats.seen === 20,
+    `${M.state.stats.owned}/${M.state.stats.seen}`);
+
+  // And back down, which an accumulating counter could never do.
+  badges = 1;
+  products = 3;
+  M.refreshStats();
+  check('the count can go down as well as up',
+    M.state.stats.owned === 1, `owned was ${M.state.stats.owned}`);
 }
 
 // --- Connection-test verdicts ------------------------------------------------
