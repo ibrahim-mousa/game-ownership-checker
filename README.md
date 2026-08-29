@@ -25,6 +25,22 @@ Humble Bundle, so you never buy the same game twice.
 
 <img src="screenshot-2.png" alt="The Steam library panel, showing games found and last sync time" width="360">
 
+### Display options
+
+The panel offers one setting with three states:
+
+| Mode | Owned games |
+| --- | --- |
+| **Normal** | badged, otherwise untouched |
+| **Dimmed** | faded and desaturated; hover to restore |
+| **Hidden** | removed from the page |
+
+**Hidden only ever hides a certain match** — an appid, exact title or alias.
+Inferred matches (*Base game owned*) are dimmed instead, because hiding one
+would silently remove a game you may not actually own, leaving nothing on the
+page to notice the mistake. A wrong badge is visible and correctable; a wrongly
+hidden card is neither.
+
 Your library is cached locally and refreshed automatically once a day.
 
 **Updates are automatic.** Your userscript manager polls the script and installs

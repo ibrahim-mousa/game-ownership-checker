@@ -20,7 +20,8 @@ function check(name, ok, detail) {
 
 const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
                  'runConnectionTest', 'interpretProbes', 'buildIndex', 'isProductCard',
-                 'badgeHost', 'badgeCard', 'issueUrl', 'reportBody', 'refreshStats', 'scan', 'compareVersions', 'updateAvailable'];
+                 'badgeHost', 'badgeCard', 'issueUrl', 'reportBody', 'refreshStats', 'scan', 'compareVersions', 'updateAvailable',
+                 'displayClassFor', 'DISPLAY_MODES', 'loadSettings'];
 
 // --- Clicking a panel button must not close the panel ------------------------
 //
@@ -247,6 +248,63 @@ const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
 
   M.state.latestVersion = '3.3.0';
   check('no notice when already current', !M.updateAvailable());
+}
+
+// --- Owned-card display modes -------------------------------------------------
+//
+// The load-bearing rule: "Hidden" only hides a CERTAIN match. An uncertain one
+// means "you own some version of this" — hiding it would silently remove a game
+// you might not actually own, with nothing left on the page to notice. Those
+// are dimmed instead.
+{
+  installGlobals();
+  const M = loadUserscript(EXPORTS);
+
+  const certain = { tier: 'exact', certain: true };
+  const inferred = { tier: 'edition', certain: false };
+
+  M.state.settings.ownedDisplay = 'normal';
+  check('normal leaves certain matches alone', M.displayClassFor(certain) === null);
+  check('normal leaves uncertain matches alone', M.displayClassFor(inferred) === null);
+
+  M.state.settings.ownedDisplay = 'dimmed';
+  check('dimmed dims a certain match', M.displayClassFor(certain) === 'steamowned-dim');
+  check('dimmed dims an uncertain match too', M.displayClassFor(inferred) === 'steamowned-dim');
+
+  M.state.settings.ownedDisplay = 'hidden';
+  check('hidden hides a certain match', M.displayClassFor(certain) === 'steamowned-hide');
+  check('hidden DIMS an uncertain match rather than hiding it',
+    M.displayClassFor(inferred) === 'steamowned-dim',
+    `got ${M.displayClassFor(inferred)} — an unowned game would vanish silently`);
+
+  // An appid match is the most certain kind there is.
+  check('hidden hides an appid match',
+    M.displayClassFor({ tier: 'appid', certain: true }) === 'steamowned-hide');
+
+  check('three modes are offered, not two toggles', M.DISPLAY_MODES.length === 3);
+}
+
+// --- Settings persistence -----------------------------------------------------
+{
+  installGlobals();
+  const M = loadUserscript(EXPORTS);
+
+  // A corrupt or hand-edited value must not leave the page in an unknown state.
+  global.localStorage.getItem = () => '{"ownedDisplay":"banana"}';
+  M.loadSettings().then(settings => {
+    check('an unknown mode falls back to normal', settings.ownedDisplay === 'normal',
+      settings.ownedDisplay);
+  });
+
+  global.localStorage.getItem = () => 'not json at all';
+  M.loadSettings().then(settings => {
+    check('unparseable settings fall back to normal', settings.ownedDisplay === 'normal');
+  });
+
+  global.localStorage.getItem = () => '{"ownedDisplay":"hidden"}';
+  M.loadSettings().then(settings => {
+    check('a valid saved mode is restored', settings.ownedDisplay === 'hidden');
+  });
 }
 
 // --- Connection-test verdicts ------------------------------------------------

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.4.0
+// @version      3.5.0
 // @description  Badges games you already own on Steam while you browse game stores. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -48,9 +48,10 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.4.0';
+  const VERSION       = '3.5.0';
   const STORE_KEY     = 'steamowned.library.v1';
   const UPDATE_KEY    = 'steamowned.update.v1';
+  const SETTINGS_KEY  = 'steamowned.settings.v1';
   const UPDATE_EVERY  = 24 * 60 * 60 * 1000;
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -724,6 +725,52 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Settings
+  // ---------------------------------------------------------------------------
+
+  // One setting, three states -- not two toggles. "Hide" always beats "dim", so
+  // independent checkboxes would have a meaningless combination.
+  const DISPLAY_MODES = [
+    ['normal', 'Normal', 'Badge owned games and leave them as they are'],
+    ['dimmed', 'Dimmed', 'Fade owned games so the rest stand out'],
+    ['hidden', 'Hidden', 'Remove owned games from the page'],
+  ];
+
+  const DEFAULT_SETTINGS = { ownedDisplay: 'normal' };
+
+  async function loadSettings() {
+    try {
+      const raw = await storageGet(SETTINGS_KEY);
+      const saved = raw ? JSON.parse(raw) : null;
+      const mode = saved && saved.ownedDisplay;
+      return {
+        ownedDisplay: DISPLAY_MODES.some(m => m[0] === mode) ? mode : DEFAULT_SETTINGS.ownedDisplay,
+      };
+    } catch {
+      return Object.assign({}, DEFAULT_SETTINGS);
+    }
+  }
+
+  async function saveSettings() {
+    await storageSet(SETTINGS_KEY, JSON.stringify(state.settings));
+  }
+
+  /**
+   * Which treatment a matched card gets.
+   *
+   * "Hidden" only ever hides a CERTAIN match. An uncertain one means "you own
+   * some version of this" -- hiding it would silently remove a game you might
+   * not actually own, with no way to notice the match was wrong. Those are
+   * dimmed instead: still on the page, still explaining themselves on hover.
+   */
+  function displayClassFor(match) {
+    const mode = state.settings.ownedDisplay;
+    if (mode === 'dimmed') return 'steamowned-dim';
+    if (mode === 'hidden') return match.certain ? 'steamowned-hide' : 'steamowned-dim';
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
   // Update check
   // ---------------------------------------------------------------------------
   //
@@ -1152,6 +1199,9 @@
     if (cs.position === 'static') host.style.position = 'relative';
     host.appendChild(makeBadge(match, null));
     card.classList.add('steamowned-match');
+
+    const treatment = displayClassFor(match);
+    if (treatment) card.classList.add(treatment);
   }
 
   // ---------------------------------------------------------------------------
@@ -1161,7 +1211,8 @@
   const state = {
     record: null, index: null, syncing: false, error: null,
     testing: false, test: null, latestVersion: null,
-    stats: { seen: 0, owned: 0 },
+    settings: Object.assign({}, DEFAULT_SETTINGS),
+    stats: { seen: 0, owned: 0, hidden: 0 },
   };
 
   /**
@@ -1175,6 +1226,7 @@
     state.stats = {
       seen: document.querySelectorAll('[data-steamowned-product="1"]').length,
       owned: document.querySelectorAll('.steamowned-badge').length,
+      hidden: document.querySelectorAll('.steamowned-hide').length,
     };
   }
 
@@ -1249,8 +1301,10 @@
       delete el.dataset.steamownedProduct;
     });
     document.querySelectorAll('.steamowned-badge').forEach(el => el.remove());
-    document.querySelectorAll('.steamowned-match').forEach(el => el.classList.remove('steamowned-match'));
-    state.stats = { seen: 0, owned: 0 };
+    document.querySelectorAll('.steamowned-match').forEach(el => {
+      el.classList.remove('steamowned-match', 'steamowned-dim', 'steamowned-hide');
+    });
+    state.stats = { seen: 0, owned: 0, hidden: 0 };
     scan();
   }
 
@@ -1372,6 +1426,43 @@
       h('span', { text: `Version ${state.latestVersion} available \u2014 update` }));
   }
 
+  function displayControl() {
+    const wrap = h('div', { class: 'steamowned-modes' });
+    wrap.appendChild(h('span', { class: 'steamowned-modes__label', text: 'Owned games' }));
+
+    const group = h('div', { class: 'steamowned-modes__group' });
+    for (const [value, label, hint] of DISPLAY_MODES) {
+      const active = state.settings.ownedDisplay === value;
+      group.appendChild(h('button', {
+        class: 'steamowned-mode' + (active ? ' is-active' : ''),
+        type: 'button',
+        title: hint,
+        text: label,
+        onclick: () => setDisplayMode(value),
+      }));
+    }
+    wrap.appendChild(group);
+
+    if (state.settings.ownedDisplay === 'hidden') {
+      wrap.appendChild(h('p', { class: 'steamowned-modes__note', text:
+        state.stats.hidden
+          ? `${formatCount(state.stats.hidden)} hidden on this page.`
+          : 'Nothing hidden on this page yet.' }));
+      wrap.appendChild(h('p', { class: 'steamowned-modes__note', text:
+        'Uncertain matches are dimmed rather than hidden, so a game you may not ' +
+        'own never disappears silently.' }));
+    }
+    return wrap;
+  }
+
+  async function setDisplayMode(mode) {
+    if (state.settings.ownedDisplay === mode) return;
+    state.settings.ownedDisplay = mode;
+    await saveSettings();
+    rescanAll();      // reapplies badges and treatments from scratch
+    renderPanel();
+  }
+
   function connectView() {
     const body = h('div', { class: 'steamowned-panel__body' });
 
@@ -1415,11 +1506,14 @@
     body.appendChild(h('p', { class: 'steamowned-count', text: `${formatCount(rec.games.length)} games found` }));
     body.appendChild(h('p', { class: 'steamowned-sub', text: `Last synced: ${formatAgo(rec.syncedAt)}` }));
     body.appendChild(h('p', { class: 'steamowned-sub', text:
-      `${formatCount(state.stats.owned)} of ${formatCount(state.stats.seen)} items on this page` }));
+      `${formatCount(state.stats.owned)} of ${formatCount(state.stats.seen)} items on this page`
+      + (state.stats.hidden ? ` \u00b7 ${formatCount(state.stats.hidden)} hidden` : '') }));
 
     if (state.error) {
       body.appendChild(errorAlert());
     }
+
+    body.appendChild(displayControl());
 
     const refreshBtn = h('button', {
       class: 'steamowned-btn', type: 'button',
@@ -1681,14 +1775,16 @@
     state.record = null;
     state.index = null;
     state.error = null;
-    state.stats = { seen: 0, owned: 0 };
+    state.stats = { seen: 0, owned: 0, hidden: 0 };
     document.querySelectorAll('.steamowned-badge').forEach(el => el.remove());
     document.querySelectorAll('[data-steamowned]').forEach(el => {
       delete el.dataset.steamowned;
       delete el.dataset.steamownedBadged;
       delete el.dataset.steamownedProduct;
     });
-    document.querySelectorAll('.steamowned-match').forEach(el => el.classList.remove('steamowned-match'));
+    document.querySelectorAll('.steamowned-match').forEach(el => {
+      el.classList.remove('steamowned-match', 'steamowned-dim', 'steamowned-hide');
+    });
     renderPanel();
   }
 
@@ -1815,6 +1911,17 @@
 .steamowned-badge--soft{color:#a7cfe4;border-color:rgba(167,207,228,.45);border-style:dashed}
 .steamowned-badge--inline{position:static;margin:10px 0 0;display:inline-flex}
 
+/* Card treatments. The badge dims along with the card: opacity and filter on an
+   ancestor apply to its whole subtree, and a child cannot be made more opaque
+   than its parent. Hovering restores the card so a dimmed listing stays
+   readable and clickable. */
+.steamowned-dim{
+  opacity:.45; filter:grayscale(.85);
+  transition:opacity .15s ease, filter .15s ease;
+}
+.steamowned-dim:hover{opacity:1; filter:grayscale(0)}
+.steamowned-hide{display:none !important}
+
 .steamowned-root{position:fixed;right:18px;bottom:18px;z-index:2147483000;
   font-family:"Nunito Sans","Brandon Text",system-ui,-apple-system,sans-serif}
 
@@ -1857,6 +1964,22 @@
 .steamowned-persona{margin:7px 0 0;font-size:12px;color:#66c0f4;font-weight:600}
 .steamowned-count{margin:4px 0 0;font-size:12.5px;color:#c7d5e0}
 .steamowned-sub{margin:2px 0 0;font-size:11px;color:#7f93a5}
+
+.steamowned-modes{margin-top:14px;padding-top:12px;border-top:1px solid rgba(199,213,224,.12)}
+.steamowned-modes__label{
+  display:block;margin-bottom:7px;font-size:10px;font-weight:700;
+  letter-spacing:.06em;text-transform:uppercase;color:#8fa3b5;
+}
+.steamowned-modes__group{display:flex;gap:0;border-radius:4px;overflow:hidden}
+.steamowned-mode{
+  flex:1;padding:7px 6px;cursor:pointer;
+  background:#1b2838;color:#8fa3b5;border:1px solid rgba(199,213,224,.15);
+  border-right-width:0;font:600 11px/1 inherit;transition:background .15s ease;
+}
+.steamowned-mode:last-child{border-right-width:1px}
+.steamowned-mode:hover{background:#24384d;color:#c7d5e0}
+.steamowned-mode.is-active{background:#2a475e;color:#fff;border-color:rgba(102,192,244,.5)}
+.steamowned-modes__note{margin:8px 0 0;font-size:10.5px;line-height:1.5;color:#7f93a5}
 
 .steamowned-actions{display:flex;gap:8px;margin-top:14px}
 .steamowned-btn{
@@ -1914,6 +2037,8 @@
 
   async function init() {
     addStyle(CSS);
+
+    state.settings = await loadSettings();
 
     const rec = await loadRecord();
     if (rec) {
