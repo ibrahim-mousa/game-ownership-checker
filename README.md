@@ -1,7 +1,7 @@
 # Owned on Steam
 
-A userscript that badges games you already own on Steam while you browse
-Humble Bundle, so you never buy the same game twice.
+A userscript that tells you which games you already own on Steam while you
+browse a game store — before you buy one twice.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
@@ -34,6 +34,8 @@ The panel offers one setting with three states:
 | **Normal** | badged, otherwise untouched |
 | **Dimmed** | faded and desaturated; hover to restore |
 | **Hidden** | removed from the page |
+
+![Owned games dimmed on the Humble store, with the display-mode control in the panel](screenshot-3.png)
 
 **Hidden only ever hides a certain match** — an appid, exact title or alias.
 Inferred matches (*Base game owned*) are dimmed instead, because hiding one
@@ -229,13 +231,25 @@ the console — the panel button always is.
 
 ## Roadmap
 
-- [x] **Phase 1** — zero-config connect, badges on store, bundle, product and wishlist pages, tiered matching
-- [ ] **Phase 2** — smarter caching: incremental refresh, cache-size limits
-- [ ] **Phase 3** — optional Steam Web API key, for checking an account you are not signed in to
-- [ ] ...
+- [x] **Phase 1 — Humble Bundle.** Zero-config connect, tiered matching,
+      badges, display modes.
+- [ ] **Phase 2 — More stores: GOG and Fanatical.** Refactor the adapters into
+      a per-store registry so a new store is one entry rather than a fork. One
+      script covers every store: userscript storage is per-script, so separate
+      scripts would mean syncing and storing your library once per store.
+- [ ] **Phase 3 — Green Man Gaming**, plus whatever the registry makes cheap.
+- [ ] **Later** — resolving store titles to appids via Steam's keyless
+      `storesearch` endpoint, which would make every match certain and retire
+      most of `ALIASES`. Smarter caching. An optional API key for checking an
+      account you are not signed in to.
 
-Bundle-page selectors are currently unverified — `steamowned.diagnose()` reports `0`
-cards there. Help welcome.
+The badge is *information*, not a warning — it says "you already own this on
+Steam", and what you do with that is your business. That holds on GOG as much
+as anywhere: plenty of people mean to buy a DRM-free copy of something they own
+on Steam, and plenty of others simply forgot they owned it at all.
+
+Bundle-page selectors are currently unverified — `steamowned.diagnose()` reports
+`0` cards there. Help welcome.
 
 ## License
 
