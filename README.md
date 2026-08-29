@@ -130,7 +130,13 @@ setup beyond a text editor.
 
 Aliases handle renamed, bundled and oddly-worded titles. On a Humble page, open
 the browser console and run `steamowned.unmatched()`, then copy the `normalized`
-column as your key. Take the appid from the Steam store URL
+column as your key.
+
+Note that the name in your Steam **library** can differ from the name on the
+Steam **store page** — `GetOwnedGames` reports app `534380` as
+`Dying Light 2: Reloaded Edition`, while the store calls it
+`Dying Light 2 Stay Human: Reloaded Edition`. Key the alias on what the *store
+you are browsing* calls it. Take the appid from the Steam store URL
 (`store.steampowered.com/app/945360/`):
 
 ```js

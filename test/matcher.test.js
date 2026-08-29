@@ -265,6 +265,30 @@ for (const [title, want, why] of CASES) {
     check(`alias  ${title}`, Boolean(match) && match.tier === 'alias', why);
   }
 
+  // The library name can lag the store name. GetOwnedGames reports app 534380
+  // as "Dying Light 2: Reloaded Edition", while both Steam's store page and
+  // Humble call it "Dying Light 2 Stay Human: Reloaded Edition" — a whole word
+  // group that no normalisation can bridge.
+  {
+    const realLibrary = M.buildIndex({
+      ownedAppIds: [],
+      games: [[534380, 'Dying Light 2: Reloaded Edition']],
+    });
+
+    for (const title of [
+      'Dying Light 2 Stay Human: Reloaded Edition',
+      'Dying Light 2 Stay Human',
+    ]) {
+      const hit = M.matchProduct(realLibrary, title, null);
+      check(`alias  ${title}`, Boolean(hit), 'library name is missing "Stay Human"');
+      check(`  and is certain`, hit && hit.certain === true);
+    }
+
+    // The library's own spelling must still match directly.
+    check('exact  the library spelling matches without an alias',
+      (M.matchProduct(realLibrary, 'Dying Light 2: Reloaded Edition', null) || {}).tier === 'exact');
+  }
+
   // An alias must not fire for a library that does not contain the appid.
   const empty = M.buildIndex({ ownedAppIds: [], games: [] });
   check('-      alias does not fire on an unowned appid',

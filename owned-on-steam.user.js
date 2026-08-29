@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.5.0
+// @version      3.5.1
 // @description  Badges games you already own on Steam while you browse game stores. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -48,7 +48,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.5.0';
+  const VERSION       = '3.5.1';
   const STORE_KEY     = 'steamowned.library.v1';
   const UPDATE_KEY    = 'steamowned.update.v1';
   const SETTINGS_KEY  = 'steamowned.settings.v1';
@@ -102,6 +102,12 @@
 
     // Humble drops the subtitle Steam keeps.
     'the witcher 3': 292030,                   // "The Witcher 3: Wild Hunt - Complete Edition"
+
+    // The reverse: GetOwnedGames reports this app as "Dying Light 2: Reloaded
+    // Edition", dropping the "Stay Human" that both stores keep. The library
+    // name can lag the store name, and no normalisation bridges a missing word.
+    'dying light 2 stay human': 534380,
+    'dying light 2 stay human reloaded edition': 534380,
   };
 
   // ---------------------------------------------------------------------------
