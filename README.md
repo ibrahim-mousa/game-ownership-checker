@@ -1,7 +1,7 @@
-# Humble Bundle — Owned on Steam
+# Owned on Steam
 
-A userscript that badges games you already own on Steam while you browse Humble Bundle,
-so you never buy the same game twice.
+A userscript that badges games you already own on Steam while you browse
+Humble Bundle, so you never buy the same game twice.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
@@ -17,7 +17,7 @@ so you never buy the same game twice.
 
 1. Install a userscript manager — [Violentmonkey](https://violentmonkey.github.io/)
    or [Tampermonkey](https://www.tampermonkey.net/).
-2. [**Install the script**](https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/humble-steam-owned.user.js)
+2. [**Install the script**](https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/owned-on-steam.user.js)
    — your manager will offer to install it and keep it updated.
 3. Make sure you are **signed in to Steam** in the same browser.
 4. Open [humblebundle.com/store](https://www.humblebundle.com/store) and click
@@ -62,7 +62,7 @@ descending order of confidence:
 | --- | --- | --- | --- |
 | 1 | **Steam appid** | Owned on Steam | appid `292030` on both sides |
 | 2 | **Exact normalised title** | Owned on Steam | `The Witcher® 3: Wild Hunt` |
-| 3 | **Alias** — curated by hand | Owned on Steam | see [`ALIASES`](humble-steam-owned.user.js) |
+| 3 | **Alias** — curated by hand | Owned on Steam | see [`ALIASES`](owned-on-steam.user.js) |
 | 4 | **Edition suffix** | depends on direction | `Borderlands 2` ↔ `Borderlands 2 GOTY` |
 | — | No match | *no badge* | |
 
@@ -163,7 +163,7 @@ The "must **not** match" cases are the important half. If you change
 normalisation or add an alias, add a case there.
 
 > The CSS lives inside a JS template literal, so a stray backtick breaks the
-> file. `node --check humble-steam-owned.user.js` catches it instantly.
+> file. `node --check owned-on-steam.user.js` catches it instantly.
 
 ---
 

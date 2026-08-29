@@ -12,7 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 
-const SCRIPT = path.join(__dirname, '..', 'humble-steam-owned.user.js');
+const SCRIPT = path.join(__dirname, '..', 'owned-on-steam.user.js');
 
 function loadUserscript(names) {
   const src = fs.readFileSync(SCRIPT, 'utf8');

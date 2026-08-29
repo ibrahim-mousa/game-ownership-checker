@@ -1,14 +1,14 @@
 // ==UserScript==
-// @name         Humble Bundle - Owned on Steam
+// @name         Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
 // @version      3.3.0
-// @description  Badges games you already own on Steam while you browse Humble Bundle. No Steam API key required.
+// @description  Badges games you already own on Steam while you browse game stores. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
 // @homepageURL  https://github.com/ibrahim-mousa/game-ownership-checker
 // @supportURL   https://github.com/ibrahim-mousa/game-ownership-checker/issues
-// @downloadURL  https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/humble-steam-owned.user.js
-// @updateURL    https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/humble-steam-owned.user.js
+// @downloadURL  https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/owned-on-steam.user.js
+// @updateURL    https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/owned-on-steam.user.js
 // @match        https://www.humblebundle.com/*
 // @connect      steamcommunity.com
 // @connect      store.steampowered.com
@@ -66,7 +66,7 @@
   const URL_OWNED_API = 'https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/';
   const URL_LOGIN     = 'https://store.steampowered.com/login/';
   const URL_ISSUES    = 'https://github.com/ibrahim-mousa/game-ownership-checker/issues/new';
-  const URL_SCRIPT    = 'https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/humble-steam-owned.user.js';
+  const URL_SCRIPT    = 'https://raw.githubusercontent.com/ibrahim-mousa/game-ownership-checker/master/owned-on-steam.user.js';
 
   const log  = (...a) => console.log(LOG, ...a);
   const warn = (...a) => console.warn(LOG, ...a);

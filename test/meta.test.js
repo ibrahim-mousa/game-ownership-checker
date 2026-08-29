@@ -56,6 +56,15 @@ const metaAll = key =>
     meta('downloadURL'));
   check('@downloadURL ends in .user.js so managers offer to install it',
     (meta('downloadURL') || '').endsWith('.user.js'));
+
+  // Renaming the file changes @downloadURL, which silently stops updates for
+  // anyone already installed. The URL must point at the file that is actually
+  // in the repo.
+  const path = require('path');
+  const filename = path.basename(SCRIPT);
+  check('@downloadURL points at this file, not an old name',
+    (meta('downloadURL') || '').endsWith('/' + filename),
+    `${meta('downloadURL')} vs ${filename}`);
 }
 
 // --- Cross-origin permissions ------------------------------------------------
