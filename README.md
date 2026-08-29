@@ -113,7 +113,7 @@ setup beyond a text editor.
 ### Adding an alias
 
 Aliases handle renamed, bundled and oddly-worded titles. On a Humble page, open
-the browser console and run `hbso.unmatched()`, then copy the `normalized`
+the browser console and run `steamowned.unmatched()`, then copy the `normalized`
 column as your key. Take the appid from the Steam store URL
 (`store.steampowered.com/app/945360/`):
 
@@ -131,7 +131,7 @@ Please include a comment saying why the entry is needed, and add a case to
 
 Humble changes its markup regularly. Every DOM hook lives in the `ADAPTERS` list
 near the top of the script as an ordered list of candidate selectors, so fixing
-a page usually means adding one selector. Run `hbso.diagnose()` to see which
+a page usually means adding one selector. Run `steamowned.diagnose()` to see which
 selectors match on the page you are looking at.
 
 ### Releasing
@@ -190,18 +190,18 @@ row reports how many games were parsed.
 
 ### Console helpers
 
-The script exposes `hbso` on the page. Userscript managers sandbox scripts that
-use `@grant`, so depending on your browser this may not be reachable from the
-console — the panel button always is.
+The script exposes `steamowned` on the page. Userscript managers sandbox scripts
+that use `@grant`, so depending on your browser this may not be reachable from
+the console — the panel button always is.
 
 | Command | Does |
 | --- | --- |
-| `hbso.unmatched()` | page items that did **not** match, with their normalised forms |
-| `hbso.diagnose()` | which card selectors matched, and how many are products |
-| `hbso.badges()` | every badge in the page, and whether it actually renders |
-| `hbso.match('Some Title')` | tests one title against your library |
-| `hbso.debugAll()` | the connection test, with full response objects |
-| `hbso.sync()` / `hbso.rescan()` / `hbso.reset()` | force a refresh, re-badge, clear |
+| `steamowned.unmatched()` | page items that did **not** match, with their normalised forms |
+| `steamowned.diagnose()` | which card selectors matched, and how many are products |
+| `steamowned.badges()` | every badge in the page, and whether it actually renders |
+| `steamowned.match('Some Title')` | tests one title against your library |
+| `steamowned.debugAll()` | the connection test, with full response objects |
+| `steamowned.sync()` / `steamowned.rescan()` / `steamowned.reset()` | force a refresh, re-badge, clear |
 
 ---
 
@@ -212,7 +212,7 @@ console — the panel button always is.
 - [ ] **Phase 3** — optional Steam Web API key, for checking an account you are not signed in to
 - [ ] ...
 
-Bundle-page selectors are currently unverified — `hbso.diagnose()` reports `0`
+Bundle-page selectors are currently unverified — `steamowned.diagnose()` reports `0`
 cards there. Help welcome.
 
 ## License

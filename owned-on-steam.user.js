@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.3.0
+// @version      3.4.0
 // @description  Badges games you already own on Steam while you browse game stores. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -48,9 +48,9 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.3.0';
-  const STORE_KEY     = 'hbso.library.v1';
-  const UPDATE_KEY    = 'hbso.update.v1';
+  const VERSION       = '3.4.0';
+  const STORE_KEY     = 'steamowned.library.v1';
+  const UPDATE_KEY    = 'steamowned.update.v1';
   const UPDATE_EVERY  = 24 * 60 * 60 * 1000;
   const LOG           = '[HB Steam]';
   const STALE_AFTER   = 24 * 60 * 60 * 1000; // background refresh after a day
@@ -82,7 +82,7 @@
   //   key    the Humble title, run through normalize()
   //   value  a Steam appid (number, most precise), or a normalized Steam title
   //
-  // To add one: open the Humble page, run hbso.unmatched() in the console and
+  // To add one: open the Humble page, run steamowned.unmatched() in the console and
   // copy the `normalized` column as the key. Find the appid in the Steam store
   // URL (store.steampowered.com/app/<APPID>/). Add a comment saying why.
   // Please add a case to test/matcher.test.js too.
@@ -159,7 +159,7 @@
       if (r.finalUrl)            bits.push('finalUrl=' + r.finalUrl);
     }
     return `${kind} ${host}` + (bits.length ? ` - ${bits.join(', ')}` : '') +
-           '. Run hbso.debugFetch() in the console for the full response.';
+           '. Run steamowned.debugFetch() in the console for the full response.';
   }
 
   /**
@@ -1001,7 +1001,7 @@
   // ---------------------------------------------------------------------------
   //
   // Humble rewrites its markup regularly, so every hook is a list of candidates
-  // tried in order. Run `hbso.diagnose()` in the console to see what is matching
+  // tried in order. Run `steamowned.diagnose()` in the console to see what is matching
   // on the current page.
 
   const ADAPTERS = [
@@ -1101,12 +1101,12 @@
 
   function makeBadge(match, variant) {
     const badge = document.createElement('div');
-    const classes = ['hbso-badge'];
-    if (variant) classes.push('hbso-badge--' + variant);
-    if (!match.certain) classes.push('hbso-badge--soft');
+    const classes = ['steamowned-badge'];
+    if (variant) classes.push('steamowned-badge--' + variant);
+    if (!match.certain) classes.push('steamowned-badge--soft');
     badge.className = classes.join(' ');
 
-    badge.appendChild(steamIcon('hbso-badge__icon'));
+    badge.appendChild(steamIcon('steamowned-badge__icon'));
 
     const label = document.createElement('span');
     // Only claim ownership when the titles actually matched. An edition or
@@ -1151,7 +1151,7 @@
     const cs = getComputedStyle(host);
     if (cs.position === 'static') host.style.position = 'relative';
     host.appendChild(makeBadge(match, null));
-    card.classList.add('hbso-owned');
+    card.classList.add('steamowned-match');
   }
 
   // ---------------------------------------------------------------------------
@@ -1173,8 +1173,8 @@
    */
   function refreshStats() {
     state.stats = {
-      seen: document.querySelectorAll('[data-hbso-product="1"]').length,
-      owned: document.querySelectorAll('.hbso-badge').length,
+      seen: document.querySelectorAll('[data-steamowned-product="1"]').length,
+      owned: document.querySelectorAll('.steamowned-badge').length,
     };
   }
 
@@ -1187,26 +1187,26 @@
         document.querySelectorAll(cardSel).forEach(card => {
           // Humble re-renders cards in place, which can wipe a badge without
           // replacing the card element. Re-do the ones that lost theirs.
-          const done = card.dataset.hbso === '1';
-          const lostBadge = card.dataset.hbsoOwned === '1' && !card.querySelector('.hbso-badge');
+          const done = card.dataset.steamowned === '1';
+          const lostBadge = card.dataset.steamownedBadged === '1' && !card.querySelector('.steamowned-badge');
           if (done && !lostBadge) return;
 
           const titleEl = pick(card, adapter.titles);
           const title = titleEl && titleEl.textContent.trim();
           if (!title) return;
 
-          card.dataset.hbso = '1';
+          card.dataset.steamowned = '1';
 
           // Not a product (genre/publisher/promo tile) -- never badge it.
           if (!isProductCard(card)) return;
 
-          card.dataset.hbsoProduct = '1';
+          card.dataset.steamownedProduct = '1';
           if (!done) fresh++;
 
           const match = matchProduct(state.index, title, extractAppId(card));
           if (match) {
             badgeCard(card, adapter, match);
-            card.dataset.hbsoOwned = '1';
+            card.dataset.steamownedBadged = '1';
           }
         });
       }
@@ -1228,12 +1228,12 @@
     if (/^\/store\/(search|subscription)/.test(location.pathname)) return;
 
     const heading = document.querySelector('.product-detail-view h1, .human-name, h1.heading-medium, h1');
-    if (!heading || heading.dataset.hbso) return;
+    if (!heading || heading.dataset.steamowned) return;
 
     const title = heading.textContent.trim();
     if (!title) return;
-    heading.dataset.hbso = '1';
-    heading.dataset.hbsoProduct = '1';
+    heading.dataset.steamowned = '1';
+    heading.dataset.steamownedProduct = '1';
 
     const match = matchProduct(state.index, title, extractAppId(document.body));
     if (!match) return;
@@ -1243,13 +1243,13 @@
   }
 
   function rescanAll() {
-    document.querySelectorAll('[data-hbso]').forEach(el => {
-      delete el.dataset.hbso;
-      delete el.dataset.hbsoOwned;
-      delete el.dataset.hbsoProduct;
+    document.querySelectorAll('[data-steamowned]').forEach(el => {
+      delete el.dataset.steamowned;
+      delete el.dataset.steamownedBadged;
+      delete el.dataset.steamownedProduct;
     });
-    document.querySelectorAll('.hbso-badge').forEach(el => el.remove());
-    document.querySelectorAll('.hbso-owned').forEach(el => el.classList.remove('hbso-owned'));
+    document.querySelectorAll('.steamowned-badge').forEach(el => el.remove());
+    document.querySelectorAll('.steamowned-match').forEach(el => el.classList.remove('steamowned-match'));
     state.stats = { seen: 0, owned: 0 };
     scan();
   }
@@ -1307,17 +1307,17 @@
 
   function mountUI() {
     els.launcher = h('button', {
-      class: 'hbso-launcher',
+      class: 'steamowned-launcher',
       type: 'button',
       title: 'Steam ownership',
       onclick: togglePanel,
     });
-    els.launcher.appendChild(steamIcon('hbso-launcher__icon'));
-    els.launcherLabel = h('span', { class: 'hbso-launcher__label' });
+    els.launcher.appendChild(steamIcon('steamowned-launcher__icon'));
+    els.launcherLabel = h('span', { class: 'steamowned-launcher__label' });
     els.launcher.appendChild(els.launcherLabel);
 
-    els.panel = h('div', { class: 'hbso-panel', hidden: '' });
-    els.root = h('div', { class: 'hbso-root' }, els.panel, els.launcher);
+    els.panel = h('div', { class: 'steamowned-panel', hidden: '' });
+    els.root = h('div', { class: 'steamowned-root' }, els.panel, els.launcher);
     document.body.appendChild(els.root);
 
     document.addEventListener('keydown', e => {
@@ -1344,7 +1344,7 @@
     if (!els.panel) return;
     const rec = state.record;
 
-    els.launcher.classList.toggle('hbso-launcher--connected', !!rec);
+    els.launcher.classList.toggle('steamowned-launcher--connected', !!rec);
     els.launcherLabel.textContent =
       state.syncing            ? 'Syncing…' :
       !rec                     ? 'Connect Steam' :
@@ -1362,21 +1362,21 @@
    */
   function updateNotice() {
     return h('a', {
-      class: 'hbso-update',
+      class: 'steamowned-update',
       href: URL_SCRIPT,
       target: '_blank',
       rel: 'noopener noreferrer',
       title: `You have ${VERSION}`,
     },
-      h('span', { class: 'hbso-update__dot' }),
+      h('span', { class: 'steamowned-update__dot' }),
       h('span', { text: `Version ${state.latestVersion} available \u2014 update` }));
   }
 
   function connectView() {
-    const body = h('div', { class: 'hbso-panel__body' });
+    const body = h('div', { class: 'steamowned-panel__body' });
 
-    body.appendChild(h('h2', { class: 'hbso-title', text: 'Connect your Steam library' }));
-    body.appendChild(h('p', { class: 'hbso-copy', text:
+    body.appendChild(h('h2', { class: 'steamowned-title', text: 'Connect your Steam library' }));
+    body.appendChild(h('p', { class: 'steamowned-copy', text:
       'Sign in to Steam in this browser, then connect. Your library is read from ' +
       'your own Steam session - no API key, no profile URL, and private libraries work too.' }));
 
@@ -1385,36 +1385,36 @@
     }
 
     const connect = h('button', {
-      class: 'hbso-btn hbso-btn--primary', type: 'button',
+      class: 'steamowned-btn steamowned-btn--primary', type: 'button',
       text: state.syncing ? 'Connecting…' : 'Connect Steam',
       onclick: () => refresh({ interactive: true }),
     });
     if (state.syncing) connect.disabled = true;
 
-    body.appendChild(h('div', { class: 'hbso-actions' }, connect));
+    body.appendChild(h('div', { class: 'steamowned-actions' }, connect));
     body.appendChild(h('a', {
-      class: 'hbso-link', href: URL_LOGIN, target: '_blank', rel: 'noopener',
+      class: 'steamowned-link', href: URL_LOGIN, target: '_blank', rel: 'noopener',
       text: 'Not signed in? Open Steam →',
     }));
-    body.appendChild(h('p', { class: 'hbso-fineprint', text:
+    body.appendChild(h('p', { class: 'steamowned-fineprint', text:
       'Your library never leaves this browser.' }));
     body.appendChild(diagnosticsSection());
     return body;
   }
 
   function connectedView(rec) {
-    const body = h('div', { class: 'hbso-panel__body' });
+    const body = h('div', { class: 'steamowned-panel__body' });
 
-    body.appendChild(h('div', { class: 'hbso-status' },
-      h('span', { class: 'hbso-check', text: '✓' }),
+    body.appendChild(h('div', { class: 'steamowned-status' },
+      h('span', { class: 'steamowned-check', text: '✓' }),
       h('span', { text: 'Steam connected' })));
 
     if (rec.persona) {
-      body.appendChild(h('p', { class: 'hbso-persona', text: rec.persona }));
+      body.appendChild(h('p', { class: 'steamowned-persona', text: rec.persona }));
     }
-    body.appendChild(h('p', { class: 'hbso-count', text: `${formatCount(rec.games.length)} games found` }));
-    body.appendChild(h('p', { class: 'hbso-sub', text: `Last synced: ${formatAgo(rec.syncedAt)}` }));
-    body.appendChild(h('p', { class: 'hbso-sub', text:
+    body.appendChild(h('p', { class: 'steamowned-count', text: `${formatCount(rec.games.length)} games found` }));
+    body.appendChild(h('p', { class: 'steamowned-sub', text: `Last synced: ${formatAgo(rec.syncedAt)}` }));
+    body.appendChild(h('p', { class: 'steamowned-sub', text:
       `${formatCount(state.stats.owned)} of ${formatCount(state.stats.seen)} items on this page` }));
 
     if (state.error) {
@@ -1422,26 +1422,26 @@
     }
 
     const refreshBtn = h('button', {
-      class: 'hbso-btn', type: 'button',
+      class: 'steamowned-btn', type: 'button',
       text: state.syncing ? 'Refreshing…' : 'Refresh library',
       onclick: () => refresh({ interactive: true }),
     });
     if (state.syncing) refreshBtn.disabled = true;
 
     const disconnect = h('button', {
-      class: 'hbso-btn hbso-btn--ghost', type: 'button', text: 'Disconnect',
+      class: 'steamowned-btn steamowned-btn--ghost', type: 'button', text: 'Disconnect',
       onclick: disconnectLibrary,
     });
 
-    body.appendChild(h('div', { class: 'hbso-actions' }, refreshBtn, disconnect));
-    body.appendChild(h('p', { class: 'hbso-fineprint', text:
+    body.appendChild(h('div', { class: 'steamowned-actions' }, refreshBtn, disconnect));
+    body.appendChild(h('p', { class: 'steamowned-fineprint', text:
       'To use a different account, switch accounts on Steam, then refresh.' }));
     body.appendChild(diagnosticsSection());
     return body;
   }
 
   function errorAlert() {
-    const alert = h('div', { class: 'hbso-alert' },
+    const alert = h('div', { class: 'steamowned-alert' },
       h('strong', { text: state.error.title }),
       h('span', { text: state.error.detail }));
 
@@ -1491,7 +1491,7 @@
 
   function issueLink(title) {
     return h('a', {
-      class: 'hbso-link',
+      class: 'steamowned-link',
       href: issueUrl(title, reportBody()),
       target: '_blank',
       rel: 'noopener noreferrer',
@@ -1501,10 +1501,10 @@
 
   /** "Run connection test" button plus its results. Shown in both panel states. */
   function diagnosticsSection() {
-    const wrap = h('div', { class: 'hbso-diag' });
+    const wrap = h('div', { class: 'steamowned-diag' });
 
     const btn = h('button', {
-      class: 'hbso-linkbtn', type: 'button',
+      class: 'steamowned-linkbtn', type: 'button',
       text: state.testing ? 'Testing…' : 'Run connection test',
       onclick: runConnectionTest,
     });
@@ -1514,7 +1514,7 @@
     if (!state.test) return wrap;
 
     const { probes, verdict } = state.test;
-    const rows = h('div', { class: 'hbso-diag__rows' });
+    const rows = h('div', { class: 'steamowned-diag__rows' });
     for (const r of probes) {
       const status = r.ok
         ? `ok (${r.status})`
@@ -1522,13 +1522,13 @@
             + (r.note ? ` \u00b7 ${r.note}` : '')
         : r.status ? `${r.kind} (${r.status})`
                    : `blocked (${r.kind}, status 0)`;
-      rows.appendChild(h('div', { class: 'hbso-diag__row' },
-        h('span', { class: 'hbso-diag__host', text: r.label || r.host }),
-        h('span', { class: 'hbso-diag__state' +
+      rows.appendChild(h('div', { class: 'steamowned-diag__row' },
+        h('span', { class: 'steamowned-diag__host', text: r.label || r.host }),
+        h('span', { class: 'steamowned-diag__state' +
           (r.ok ? ' is-ok' : r.informational ? ' is-muted' : ' is-bad'), text: status })));
     }
     wrap.appendChild(rows);
-    wrap.appendChild(h('p', { class: 'hbso-diag__verdict hbso-diag__verdict--' + verdict.level, text: verdict.text }));
+    wrap.appendChild(h('p', { class: 'steamowned-diag__verdict steamowned-diag__verdict--' + verdict.level, text: verdict.text }));
     if (verdict.report) {
       wrap.appendChild(issueLink('Connection test: ' + verdict.text.slice(0, 80)));
     }
@@ -1551,8 +1551,8 @@
         'biggest scripts:',
         ...hints.biggestScripts.map(x => '  ' + x),
       ];
-      wrap.appendChild(h('p', { class: 'hbso-diag__label', text: 'Page structure' }));
-      wrap.appendChild(h('pre', { class: 'hbso-diag__pre', text: lines.join('\n') }));
+      wrap.appendChild(h('p', { class: 'steamowned-diag__label', text: 'Page structure' }));
+      wrap.appendChild(h('pre', { class: 'steamowned-diag__pre', text: lines.join('\n') }));
     }
 
     return wrap;
@@ -1682,18 +1682,18 @@
     state.index = null;
     state.error = null;
     state.stats = { seen: 0, owned: 0 };
-    document.querySelectorAll('.hbso-badge').forEach(el => el.remove());
-    document.querySelectorAll('[data-hbso]').forEach(el => {
-      delete el.dataset.hbso;
-      delete el.dataset.hbsoOwned;
-      delete el.dataset.hbsoProduct;
+    document.querySelectorAll('.steamowned-badge').forEach(el => el.remove());
+    document.querySelectorAll('[data-steamowned]').forEach(el => {
+      delete el.dataset.steamowned;
+      delete el.dataset.steamownedBadged;
+      delete el.dataset.steamownedProduct;
     });
-    document.querySelectorAll('.hbso-owned').forEach(el => el.classList.remove('hbso-owned'));
+    document.querySelectorAll('.steamowned-match').forEach(el => el.classList.remove('steamowned-match'));
     renderPanel();
   }
 
   // ---------------------------------------------------------------------------
-  // Console helpers - `hbso.diagnose()` etc.
+  // Console helpers - `steamowned.diagnose()` etc.
   // ---------------------------------------------------------------------------
 
   const api = {
@@ -1716,7 +1716,7 @@
 
     /** Reports every badge in the page: where it is, and whether it renders. */
     badges() {
-      const rows = Array.from(document.querySelectorAll('.hbso-badge')).map(el => {
+      const rows = Array.from(document.querySelectorAll('.steamowned-badge')).map(el => {
         const rect = el.getBoundingClientRect();
         const cs = getComputedStyle(el);
         const host = el.parentElement;
@@ -1799,7 +1799,7 @@
 /* Top-right: Humble draws its own diagonal "EARLY ACCESS" / "NEW" ribbon across
    the top-left corner. This only works because badgeHost() refuses to position
    the badge against a link -- see the note there before changing either. */
-.hbso-badge{
+.steamowned-badge{
   position:absolute; top:8px; right:8px; z-index:30;
   display:inline-flex; align-items:center; gap:5px;
   padding:3px 7px; border-radius:3px;
@@ -1811,96 +1811,96 @@
   box-shadow:0 1px 6px rgba(0,0,0,.45);
   pointer-events:auto;
 }
-.hbso-badge__icon{width:11px;height:11px;flex:0 0 auto;opacity:.95}
-.hbso-badge--soft{color:#a7cfe4;border-color:rgba(167,207,228,.45);border-style:dashed}
-.hbso-badge--inline{position:static;margin:10px 0 0;display:inline-flex}
+.steamowned-badge__icon{width:11px;height:11px;flex:0 0 auto;opacity:.95}
+.steamowned-badge--soft{color:#a7cfe4;border-color:rgba(167,207,228,.45);border-style:dashed}
+.steamowned-badge--inline{position:static;margin:10px 0 0;display:inline-flex}
 
-.hbso-root{position:fixed;right:18px;bottom:18px;z-index:2147483000;
+.steamowned-root{position:fixed;right:18px;bottom:18px;z-index:2147483000;
   font-family:"Nunito Sans","Brandon Text",system-ui,-apple-system,sans-serif}
 
-.hbso-launcher{
+.steamowned-launcher{
   display:flex;align-items:center;gap:7px;margin-left:auto;
   padding:8px 13px;border-radius:999px;cursor:pointer;
   background:#1b2838;color:#c7d5e0;border:1px solid rgba(102,192,244,.35);
   font:600 12px/1 inherit;box-shadow:0 4px 14px rgba(0,0,0,.4);
   transition:background .15s ease,border-color .15s ease;
 }
-.hbso-launcher:hover{background:#24384d;border-color:rgba(102,192,244,.7)}
-.hbso-launcher__icon{width:15px;height:15px;color:#66c0f4}
-.hbso-launcher--connected .hbso-launcher__icon{color:#5ba32b}
+.steamowned-launcher:hover{background:#24384d;border-color:rgba(102,192,244,.7)}
+.steamowned-launcher__icon{width:15px;height:15px;color:#66c0f4}
+.steamowned-launcher--connected .steamowned-launcher__icon{color:#5ba32b}
 
-.hbso-panel{
+.steamowned-panel{
   width:288px;margin-bottom:10px;border-radius:8px;overflow:hidden;
   background:#12212f;border:1px solid rgba(102,192,244,.22);
   box-shadow:0 12px 34px rgba(0,0,0,.55);color:#c7d5e0;
 }
-.hbso-panel[hidden]{display:none}
-.hbso-panel__body{padding:16px}
+.steamowned-panel[hidden]{display:none}
+.steamowned-panel__body{padding:16px}
 
-.hbso-update{
+.steamowned-update{
   display:flex;align-items:center;gap:7px;
   padding:9px 16px;text-decoration:none;
   background:rgba(102,192,244,.12);
   border-bottom:1px solid rgba(102,192,244,.25);
   color:#66c0f4;font:600 11px/1.3 inherit;
 }
-.hbso-update:hover{background:rgba(102,192,244,.2)}
-.hbso-update__dot{
+.steamowned-update:hover{background:rgba(102,192,244,.2)}
+.steamowned-update__dot{
   width:6px;height:6px;border-radius:50%;flex:0 0 auto;
   background:#66c0f4;box-shadow:0 0 0 3px rgba(102,192,244,.25);
 }
 
-.hbso-title{margin:0 0 7px;font-size:14px;font-weight:700;color:#fff}
-.hbso-copy{margin:0 0 13px;font-size:11.5px;line-height:1.55;color:#8fa3b5}
-.hbso-status{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:#fff}
-.hbso-check{color:#5ba32b;font-size:15px}
-.hbso-persona{margin:7px 0 0;font-size:12px;color:#66c0f4;font-weight:600}
-.hbso-count{margin:4px 0 0;font-size:12.5px;color:#c7d5e0}
-.hbso-sub{margin:2px 0 0;font-size:11px;color:#7f93a5}
+.steamowned-title{margin:0 0 7px;font-size:14px;font-weight:700;color:#fff}
+.steamowned-copy{margin:0 0 13px;font-size:11.5px;line-height:1.55;color:#8fa3b5}
+.steamowned-status{display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:#fff}
+.steamowned-check{color:#5ba32b;font-size:15px}
+.steamowned-persona{margin:7px 0 0;font-size:12px;color:#66c0f4;font-weight:600}
+.steamowned-count{margin:4px 0 0;font-size:12.5px;color:#c7d5e0}
+.steamowned-sub{margin:2px 0 0;font-size:11px;color:#7f93a5}
 
-.hbso-actions{display:flex;gap:8px;margin-top:14px}
-.hbso-btn{
+.steamowned-actions{display:flex;gap:8px;margin-top:14px}
+.steamowned-btn{
   flex:1;padding:8px 10px;border-radius:4px;cursor:pointer;
   background:#2a475e;color:#c7d5e0;border:1px solid transparent;
   font:600 11.5px/1 inherit;transition:background .15s ease;
 }
-.hbso-btn:hover:not(:disabled){background:#35566f}
-.hbso-btn:disabled{opacity:.6;cursor:default}
-.hbso-btn--primary{background:#66c0f4;color:#0d1b26}
-.hbso-btn--primary:hover:not(:disabled){background:#8ed2fb}
-.hbso-btn--ghost{flex:0 0 auto;background:transparent;border-color:rgba(199,213,224,.25);color:#8fa3b5}
-.hbso-btn--ghost:hover{background:rgba(199,213,224,.08)}
+.steamowned-btn:hover:not(:disabled){background:#35566f}
+.steamowned-btn:disabled{opacity:.6;cursor:default}
+.steamowned-btn--primary{background:#66c0f4;color:#0d1b26}
+.steamowned-btn--primary:hover:not(:disabled){background:#8ed2fb}
+.steamowned-btn--ghost{flex:0 0 auto;background:transparent;border-color:rgba(199,213,224,.25);color:#8fa3b5}
+.steamowned-btn--ghost:hover{background:rgba(199,213,224,.08)}
 
-.hbso-link{display:inline-block;margin-top:11px;font-size:11.5px;color:#66c0f4;text-decoration:none}
-.hbso-link:hover{text-decoration:underline}
-.hbso-fineprint{margin:11px 0 0;font-size:10.5px;line-height:1.5;color:#6b7f91}
-.hbso-alert{
+.steamowned-link{display:inline-block;margin-top:11px;font-size:11.5px;color:#66c0f4;text-decoration:none}
+.steamowned-link:hover{text-decoration:underline}
+.steamowned-fineprint{margin:11px 0 0;font-size:10.5px;line-height:1.5;color:#6b7f91}
+.steamowned-alert{
   margin:0 0 12px;padding:9px 10px;border-radius:4px;
   background:rgba(214,92,74,.12);border:1px solid rgba(214,92,74,.4);
   font-size:11px;line-height:1.5;color:#e6b0a6;
 }
-.hbso-alert strong{color:#f0c4bb;font-weight:700}
-.hbso-alert .hbso-link{margin-top:6px;color:#f0c4bb;text-decoration:underline}
+.steamowned-alert strong{color:#f0c4bb;font-weight:700}
+.steamowned-alert .steamowned-link{margin-top:6px;color:#f0c4bb;text-decoration:underline}
 
-.hbso-diag{margin-top:12px;padding-top:11px;border-top:1px solid rgba(199,213,224,.12)}
-.hbso-linkbtn{
+.steamowned-diag{margin-top:12px;padding-top:11px;border-top:1px solid rgba(199,213,224,.12)}
+.steamowned-linkbtn{
   padding:0;background:none;border:0;cursor:pointer;
   color:#66c0f4;font:600 11px/1 inherit;text-decoration:underline;
 }
-.hbso-linkbtn:disabled{opacity:.6;cursor:default;text-decoration:none}
-.hbso-diag__rows{margin-top:9px;display:flex;flex-direction:column;gap:4px}
-.hbso-diag__row{display:flex;justify-content:space-between;gap:8px;font-size:10.5px}
-.hbso-diag__host{color:#8fa3b5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.hbso-diag__state{font-weight:700}
-.hbso-diag__state.is-ok{color:#5ba32b}
-.hbso-diag__state.is-bad{color:#d65c4a}
-.hbso-diag__state.is-muted{color:#6b7f91;font-weight:400}
-.hbso-diag__verdict{margin:9px 0 0;font-size:10.5px;line-height:1.5;color:#8fa3b5}
-.hbso-diag__verdict--bad{color:#e6b0a6}
-.hbso-diag__verdict--ok{color:#9ec97f}
-.hbso-diag__label{margin:10px 0 4px;font-size:10px;font-weight:700;letter-spacing:.06em;
+.steamowned-linkbtn:disabled{opacity:.6;cursor:default;text-decoration:none}
+.steamowned-diag__rows{margin-top:9px;display:flex;flex-direction:column;gap:4px}
+.steamowned-diag__row{display:flex;justify-content:space-between;gap:8px;font-size:10.5px}
+.steamowned-diag__host{color:#8fa3b5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.steamowned-diag__state{font-weight:700}
+.steamowned-diag__state.is-ok{color:#5ba32b}
+.steamowned-diag__state.is-bad{color:#d65c4a}
+.steamowned-diag__state.is-muted{color:#6b7f91;font-weight:400}
+.steamowned-diag__verdict{margin:9px 0 0;font-size:10.5px;line-height:1.5;color:#8fa3b5}
+.steamowned-diag__verdict--bad{color:#e6b0a6}
+.steamowned-diag__verdict--ok{color:#9ec97f}
+.steamowned-diag__label{margin:10px 0 4px;font-size:10px;font-weight:700;letter-spacing:.06em;
   text-transform:uppercase;color:#8fa3b5}
-.hbso-diag__pre{
+.steamowned-diag__pre{
   margin:0;padding:8px;max-height:150px;overflow:auto;
   background:rgba(0,0,0,.28);border-radius:3px;
   font:400 10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -1940,14 +1940,14 @@
     let exposed = false;
     for (const target of [pageWindow, window]) {
       try {
-        Object.defineProperty(target, 'hbso', { value: api, configurable: true, writable: true });
+        Object.defineProperty(target, 'steamowned', { value: api, configurable: true, writable: true });
         exposed = true;
       } catch {
-        try { target.hbso = api; exposed = true; } catch { /* Xray boundary */ }
+        try { target.steamowned = api; exposed = true; } catch { /* Xray boundary */ }
       }
     }
     if (!exposed) {
-      warn('could not expose `hbso` to the page console; use the panel\u2019s "Run connection test" button instead.');
+      warn('could not expose `steamowned` to the page console; use the panel\u2019s "Run connection test" button instead.');
     }
 
     log(`v${VERSION} ready.`, rec ? `${rec.games.length} games loaded.` : 'Not connected yet.');

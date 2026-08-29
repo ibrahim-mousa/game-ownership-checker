@@ -193,8 +193,8 @@ const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
   let badges = 2;
   let products = 6;
   global.document.querySelectorAll = sel => {
-    if (sel === '.hbso-badge') return new Array(badges).fill(null);
-    if (sel === '[data-hbso-product="1"]') return new Array(products).fill(null);
+    if (sel === '.steamowned-badge') return new Array(badges).fill(null);
+    if (sel === '[data-steamowned-product="1"]') return new Array(products).fill(null);
     return [];
   };
 
