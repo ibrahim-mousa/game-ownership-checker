@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.5.1
+// @version      3.5.2
 // @description  Badges games you already own on Steam while you browse game stores. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -48,7 +48,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.5.1';
+  const VERSION       = '3.5.2';
   const STORE_KEY     = 'steamowned.library.v1';
   const UPDATE_KEY    = 'steamowned.update.v1';
   const SETTINGS_KEY  = 'steamowned.settings.v1';
@@ -1100,8 +1100,16 @@
   function isProductCard(card) {
     const href = cardHref(card);
     if (!href) return true;
-    if (href.includes('?')) return false; // filtered search, never a product page
-    return !NON_PRODUCT_PATH.test(href);
+
+    // Judge the PATH only. Carousels append tracking parameters to ordinary
+    // product links, so rejecting anything containing "?" skipped every card
+    // in them -- while still letting through what it was meant to catch,
+    // since /store/search is a bad path regardless of its query.
+    const path = href.split('#')[0].split('?')[0];
+
+    if (NON_PRODUCT_PATH.test(path)) return false;
+    if (/\/store\/?$/.test(path)) return false; // the listing itself, not a product
+    return true;
   }
 
   function pick(root, selectors) {

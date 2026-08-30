@@ -80,6 +80,17 @@ const EXPORTS = ['state', 'els', 'mountUI', 'renderPanel', 'openPanel',
     ['/store/search?genres=puzzle',         false, 'genre tile'],
     ['/store/search?publishers=team17',     false, 'publisher tile'],
     ['/store/search?sort=discount&price=5', false, 'a "Deals Under $5" tile'],
+
+    // Carousels append tracking parameters to ordinary product links. Rejecting
+    // any href containing "?" skipped every card in the "Other Popular Games"
+    // strip on a product page.
+    ['/store/hollow-knight?hmb_source=carousel',        true,  'product link with tracking params'],
+    ['/store/dying-light-2?utm_medium=web&utm_id=7',    true,  'product link with utm params'],
+    ['/store/slay-the-spire#details',                   true,  'product link with a fragment'],
+    ['https://www.humblebundle.com/store/noita?ref=x',  true,  'absolute product URL with a query'],
+    ['https://www.humblebundle.com/store/search?q=rpg', false, 'absolute search URL'],
+    ['/store',                                          false, 'the store listing itself'],
+    ['/store/',                                         false, 'the store listing with a slash'],
     ['/store/promo/summer-sale',            false, 'promo tile'],
     ['/store/browse/rpg',                   false, 'browse tile'],
     ['/subscription/gamingpass',            false, 'subscription tile'],
