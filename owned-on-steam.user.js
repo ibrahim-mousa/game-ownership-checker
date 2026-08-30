@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Owned on Steam
 // @namespace    https://github.com/ibrahim-mousa/game-ownership-checker
-// @version      3.5.2
+// @version      3.6.0
 // @description  Badges games you already own on Steam while you browse game stores. No Steam API key required.
 // @author       Ibrahim Mousa
 // @license      MIT
@@ -26,6 +26,33 @@
 // ==/UserScript==
 
 /*
+ * Layout
+ * ------
+ * The file reads top to bottom in dependency order. To find your way around:
+ *
+ *   Config             URLs, storage keys, timings
+ *   Alias map          hand-checked title fixes -- start here for a wrong match
+ *   Manager shims      GM_* wrappers, and the one request() everything uses
+ *   Steam client       fetching and parsing the library
+ *   Settings           the Normal / Dimmed / Hidden display mode
+ *   Update check       compares @version against the published script
+ *   Title normalisation  turning two store spellings into one comparable key
+ *   Matching           the tier ladder: appid, exact, alias, edition
+ *   Page adapters      per-store DOM selectors -- start here for a broken page
+ *   Badge rendering    building and placing the badge
+ *   Scanning           walking the page, and re-walking it when it changes
+ *   UI                 the panel
+ *   Actions            connect, refresh, disconnect, connection test
+ *   Console helpers    steamowned.diagnose() and friends
+ *   Styles             all CSS, in one template literal
+ *   Boot               wiring it together
+ *
+ * Two things that bite people editing this file:
+ *   - The Styles section is a template literal. A stray backtick breaks the
+ *     whole script. `node --check owned-on-steam.user.js` catches it.
+ *   - Bump @version AND the VERSION constant together, or nobody receives the
+ *     change. test/meta.test.js fails if they disagree.
+ *
  * How this works
  * --------------
  * Your Steam library is read through your existing Steam browser session:
@@ -48,7 +75,7 @@
   // Config
   // ---------------------------------------------------------------------------
 
-  const VERSION       = '3.5.2';
+  const VERSION       = '3.6.0';
   const STORE_KEY     = 'steamowned.library.v1';
   const UPDATE_KEY    = 'steamowned.update.v1';
   const SETTINGS_KEY  = 'steamowned.settings.v1';
@@ -501,10 +528,10 @@
     return out;
   }
 
-  /** The biggest games array found anywhere in `node`, or null. */
-  function findGameArray(node) {
+  /** The longest of several arrays, or null if there are none. */
+  function largest(arrays) {
     let best = null;
-    for (const candidate of collectGameArrays(node)) {
+    for (const candidate of arrays) {
       if (!best || candidate.length > best.length) best = candidate;
     }
     return best;
@@ -529,21 +556,21 @@
     try { outer = JSON.parse(literal); }
     catch (e) { warn('could not parse SSR.loaderData:', e.message); return null; }
 
-    // Scan every entry, keeping the largest candidate rather than the first.
-    let best = null;
-    const sizes = [];
+    // Every entry is scanned, and the largest candidate wins: a profile carries
+    // several games arrays and "recently played" sits earlier in the tree.
+    const candidates = [];
     for (const entry of Array.isArray(outer) ? outer : []) {
       let inner = entry;
       if (typeof entry === 'string') {
         try { inner = JSON.parse(entry); } catch { continue; }
       }
-      for (const candidate of collectGameArrays(inner)) {
-        sizes.push(candidate.length);
-        if (!best || candidate.length > best.length) best = candidate;
-      }
+      candidates.push(...collectGameArrays(inner));
     }
-    if (sizes.length > 1) log('games arrays found in SSR state:', sizes.join(', '), '-> using largest');
-    return best;
+
+    if (candidates.length > 1) {
+      log('games arrays in SSR state:', candidates.map(c => c.length).join(', '), '-> using largest');
+    }
+    return largest(candidates);
   }
 
   /**
@@ -955,11 +982,6 @@
     return spellings(stripped);
   }
 
-  /** Both sets together. Used for reporting, not for deciding a tier. */
-  function fullKeys(title) {
-    return Array.from(new Set([...exactKeys(title), ...editionKeys(title)]));
-  }
-
   // ---------------------------------------------------------------------------
   // Matching
   // ---------------------------------------------------------------------------
@@ -994,6 +1016,14 @@
    * Deliberately no fuzzy/subtitle matching. Anything normalisation cannot
    * bridge belongs in ALIASES, where a human has checked it.
    */
+  /** First key that is present in `map`, or null. */
+  function lookup(map, keys) {
+    for (const key of keys) {
+      if (map.has(key)) return map.get(key);
+    }
+    return null;
+  }
+
   function matchProduct(index, title, appid) {
     if (appid && index.appIds.has(Number(appid))) {
       return { tier: 'appid', how: 'Steam appid ' + appid, name: null, certain: true };
@@ -1001,49 +1031,44 @@
     if (!title) return null;
     if (NON_GAME.test(normalize(title))) return null;
 
-    const exact = exactKeys(title);
+    const asWritten = exactKeys(title);
+    const withoutEdition = editionKeys(title);
+    let hit;
 
-    for (const k of exact) {
-      if (index.full.has(k)) {
-        return { tier: 'exact', how: 'exact title match', name: index.full.get(k), certain: true };
-      }
-    }
+    hit = lookup(index.full, asWritten);
+    if (hit) return { tier: 'exact', how: 'exact title match', name: hit, certain: true };
 
     const alias = ALIASES[normalize(title)];
-    if (alias != null) {
-      if (typeof alias === 'number' && index.appIds.has(alias)) {
-        return { tier: 'alias', how: 'alias -> appid ' + alias, name: null, certain: true };
-      }
-      if (typeof alias === 'string' && index.full.has(alias)) {
-        return { tier: 'alias', how: 'alias -> ' + alias, name: index.full.get(alias), certain: true };
-      }
+    if (typeof alias === 'number' && index.appIds.has(alias)) {
+      return { tier: 'alias', how: 'alias -> appid ' + alias, name: null, certain: true };
+    }
+    if (typeof alias === 'string' && index.full.has(alias)) {
+      return { tier: 'alias', how: 'alias -> ' + alias, name: index.full.get(alias), certain: true };
     }
 
-    // Direction matters. Here the STEAM name carries the edition suffix and the
-    // Humble title is the plain one, so you own a superset of what is on sale --
-    // an edition always includes the base game. Steam also renames base apps
-    // outright (292030 is now "The Witcher 3: Wild Hunt - Complete Edition"),
-    // so this is the common case, not an edge case. Certain.
-    for (const k of exact) {
-      if (index.edition.has(k)) {
-        return { tier: 'edition', how: 'you own an edition that includes this game',
-                 name: index.edition.get(k), certain: true };
-      }
+    // The STEAM name carries the edition suffix and the store's title is the
+    // plain one, so you own a superset -- an edition always includes the base
+    // game. Steam renames base apps outright (292030 is now "The Witcher 3:
+    // Wild Hunt - Complete Edition"), so this is the common case. Certain.
+    hit = lookup(index.edition, asWritten);
+    if (hit) {
+      return { tier: 'edition', how: 'you own an edition that includes this game',
+               name: hit, certain: true };
     }
 
-    // The other direction: the HUMBLE listing carries the edition suffix and you
-    // own the plain game. You own less than what is on sale, so this stays
-    // uncertain -- owning Borderlands 2 is not owning Borderlands 2 GOTY.
-    const stripped = editionKeys(title);
-    for (const k of stripped) {
-      if (index.full.has(k)) {
-        return { tier: 'edition', how: 'you own the base game, not this edition',
-                 name: index.full.get(k), certain: false };
-      }
-      if (index.edition.has(k)) {
-        return { tier: 'edition', how: 'you own a different edition of this game',
-                 name: index.edition.get(k), certain: false };
-      }
+    // The other direction: the STORE listing carries the edition suffix and you
+    // own the plain game, so you own less than what is on sale. Owning
+    // Borderlands 2 is not owning Borderlands 2 GOTY. Never certain.
+    hit = lookup(index.full, withoutEdition);
+    if (hit) {
+      return { tier: 'edition', how: 'you own the base game, not this edition',
+               name: hit, certain: false };
+    }
+
+    hit = lookup(index.edition, withoutEdition);
+    if (hit) {
+      return { tier: 'edition', how: 'you own a different edition of this game',
+               name: hit, certain: false };
     }
 
     return null;
@@ -1308,17 +1333,27 @@
     heading.insertAdjacentElement('afterend', badge);
   }
 
-  function rescanAll() {
+  /**
+   * Removes every mark this script has put on the page: badges, the data-
+   * attributes that stop cards being re-processed, and the display treatments.
+   * Shared so the two callers cannot drift -- they already had to be kept in
+   * step by hand every time a new marker was added.
+   */
+  function clearPageMarks() {
+    document.querySelectorAll('.steamowned-badge').forEach(el => el.remove());
     document.querySelectorAll('[data-steamowned]').forEach(el => {
       delete el.dataset.steamowned;
       delete el.dataset.steamownedBadged;
       delete el.dataset.steamownedProduct;
     });
-    document.querySelectorAll('.steamowned-badge').forEach(el => el.remove());
     document.querySelectorAll('.steamowned-match').forEach(el => {
       el.classList.remove('steamowned-match', 'steamowned-dim', 'steamowned-hide');
     });
     state.stats = { seen: 0, owned: 0, hidden: 0 };
+  }
+
+  function rescanAll() {
+    clearPageMarks();
     scan();
   }
 
@@ -1707,6 +1742,57 @@
     { key: 'store',    label: 'store.steampowered.com', url: URL_USERDATA },
   ];
 
+  /**
+   * Reads what a probe's body actually says. A 200 proves nothing on its own:
+   * signed out, Steam answers 200 with a login page or an empty payload.
+   */
+  function annotateProbe(report, steamIdFromRoot) {
+    const body = (report.raw && report.raw.responseText) || '';
+    if (!report.ok) return report;
+
+    if (report.key === 'root') {
+      report.steamId = parseSteamId(body);
+      report.note = report.steamId ? 'signed in' : 'SIGNED OUT (no cookies)';
+    }
+
+    if (report.key === 'feed') {
+      if (looksLikeLoginPage({ finalUrl: report.finalUrl || '', text: body })) {
+        report.note = 'login page, not your library';
+      } else {
+        const rows = parseProfileGames(body);
+        report.gamesFound = rows ? rows.length : null;
+        report.token = parseWebApiToken(body);
+        report.note = (rows ? `${rows.length} parsed from page` : 'markup not recognised')
+          + (report.token ? ', token found' : ', NO token');
+        if (!rows) report.hints = describeMarkup(body);
+        report.steamId = steamIdFromRoot || parseProfileIdentity(body).steamId;
+      }
+    }
+
+    if (report.key === 'store') {
+      try {
+        const data = JSON.parse(body);
+        report.ownedCount = Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps.length : 0;
+      } catch {
+        report.ownedCount = null;
+      }
+    }
+
+    return report;
+  }
+
+  /** The web API row: the path Connect actually uses, reported separately. */
+  async function probeWebApi(feed) {
+    if (!feed || !feed.token || !feed.steamId) return null;
+    const games = await fetchOwnedViaApi(feed.token, feed.steamId).catch(() => null);
+    return {
+      key: 'api', label: '  \u21b3 web API (used)',
+      ok: Boolean(games), status: games ? 200 : 0, informational: false,
+      note: games ? `${games.length} games` : 'call failed',
+      gamesFound: games ? games.length : null,
+    };
+  }
+
   async function runConnectionTest() {
     if (state.testing) return;
     state.testing = true;
@@ -1715,72 +1801,31 @@
 
     const probes = [];
     const byKey = {};
-    let apiRow = null;
+
     for (const spec of PROBES) {
-      const report = Object.assign(await probeRequest(spec.url),
-        { key: spec.key, label: spec.label, informational: spec.informational || false });
-
-      // A 200 proves nothing on its own. Signed out, Steam answers 200 with a
-      // login page or an empty payload, so every probe checks the body.
-      const bodyText = (report.raw && report.raw.responseText) || '';
-
-      if (spec.key === 'root' && report.ok) {
-        report.steamId = parseSteamId(bodyText);
-        report.note = report.steamId ? 'signed in' : 'SIGNED OUT (no cookies)';
-      }
-
-      if (spec.key === 'feed' && report.ok) {
-        if (looksLikeLoginPage({ finalUrl: report.finalUrl || '', text: bodyText })) {
-          report.note = 'login page, not your library';
-        } else {
-          const rows = parseProfileGames(bodyText);
-          report.gamesFound = rows ? rows.length : null;
-          report.token = parseWebApiToken(bodyText);
-          report.note = (rows ? `${rows.length} parsed from page` : 'markup not recognised')
-            + (report.token ? ', token found' : ', NO token');
-          if (!rows) report.hints = describeMarkup(bodyText);
-
-          // The real path Connect uses. Reported separately so page parsing
-          // falling short (it carries several small lists) is not mistaken for
-          // the library actually being incomplete.
-          const steamId = (byKey.root && byKey.root.steamId)
-            || parseProfileIdentity(bodyText).steamId;
-          if (report.token && steamId) {
-            const viaApi = await fetchOwnedViaApi(report.token, steamId).catch(() => null);
-            apiRow = {
-              key: 'api', label: '  \u21b3 web API (used)', ok: Boolean(viaApi),
-              status: viaApi ? 200 : 0, informational: false,
-              note: viaApi ? `${viaApi.length} games` : 'call failed',
-              gamesFound: viaApi ? viaApi.length : null,
-            };
-          }
-        }
-      }
-
-      if (spec.key === 'store' && report.ok) {
-        try {
-          const data = JSON.parse(bodyText);
-          report.ownedCount = Array.isArray(data.rgOwnedApps) ? data.rgOwnedApps.length : 0;
-        } catch { report.ownedCount = null; }
-      }
-
+      const report = Object.assign(await probeRequest(spec.url), {
+        key: spec.key,
+        label: spec.label,
+        informational: spec.informational || false,
+      });
+      annotateProbe(report, byKey.root && byKey.root.steamId);
       probes.push(report);
       byKey[spec.key] = report;
     }
 
+    const apiRow = await probeWebApi(byKey.feed);
     if (apiRow) {
       const at = probes.findIndex(r => r.key === 'xml');
       probes.splice(at === -1 ? probes.length : at, 0, apiRow);
       byKey.api = apiRow;
     }
 
-    const verdict = interpretProbes(byKey);
-    state.test = { probes, byKey, verdict };
+    state.test = { probes, byKey, verdict: interpretProbes(byKey) };
     state.testing = false;
     renderPanel();
 
-    console.log(LOG, 'connection test:', verdict.text);
-    for (const r of probes) console.log(LOG, r.url, '->', r);
+    console.log(LOG, 'connection test:', state.test.verdict.text);
+    for (const r of probes) console.log(LOG, r.url || r.label, '->', r);
     return state.test;
   }
 
@@ -1789,16 +1834,7 @@
     state.record = null;
     state.index = null;
     state.error = null;
-    state.stats = { seen: 0, owned: 0, hidden: 0 };
-    document.querySelectorAll('.steamowned-badge').forEach(el => el.remove());
-    document.querySelectorAll('[data-steamowned]').forEach(el => {
-      delete el.dataset.steamowned;
-      delete el.dataset.steamownedBadged;
-      delete el.dataset.steamownedProduct;
-    });
-    document.querySelectorAll('.steamowned-match').forEach(el => {
-      el.classList.remove('steamowned-match', 'steamowned-dim', 'steamowned-hide');
-    });
+    clearPageMarks();
     renderPanel();
   }
 

@@ -15,7 +15,8 @@ const { loadUserscript } = require('./load');
 const M = loadUserscript([
   'decodeEntities', 'parseProfileGames', 'parseProfileIdentity', 'normaliseRows',
   'parseSteamId', 'profileGamesUrl', 'scavengeGames',
-  'parseWebApiToken', 'parseLoaderData', 'extractLiteral', 'findGameArray',
+  'parseWebApiToken', 'parseLoaderData', 'extractLiteral',
+  'largest', 'collectGameArrays',
   'collectGameArrays',
 ]);
 
@@ -160,7 +161,7 @@ function check(name, ok, detail) {
     M.collectGameArrays({ recentlyPlayed: recent, all: { games: library } }).length === 2);
 
   check('picks the largest, not the first',
-    (M.findGameArray({ recentlyPlayed: recent, all: { games: library } }) || []).length === 3000);
+    (M.largest(M.collectGameArrays({ recentlyPlayed: recent, all: { games: library } })) || []).length === 3000);
 
   // Same thing end to end, through the double-encoded SSR wrapper.
   const inner = JSON.stringify({ rgRecentGames: recent, rgGames: library });
@@ -191,11 +192,11 @@ function check(name, ok, detail) {
 // --- Game-array discovery ----------------------------------------------------
 {
   check('finds a nested games array',
-    (M.findGameArray({ a: { b: { c: [{ appid: 1, name: 'X' }] } } }) || []).length === 1);
+    (M.largest(M.collectGameArrays({ a: { b: { c: [{ appid: 1, name: 'X' }] } } })) || []).length === 1);
   check('ignores arrays that are not games',
-    M.findGameArray({ a: [{ foo: 1 }], b: [1, 2, 3] }) === null);
+    M.largest(M.collectGameArrays({ a: [{ foo: 1 }], b: [1, 2, 3] })) === null);
   check('does not recurse forever on deep junk',
-    M.findGameArray(JSON.parse('{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":1}}}}}}}}}}')) === null);
+    M.largest(M.collectGameArrays(JSON.parse('{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":1}}}}}}}}}}'))) === null);
 }
 
 // --- Failure modes -----------------------------------------------------------
